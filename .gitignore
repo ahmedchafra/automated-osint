@@ -1,0 +1,32 @@
+# ── API keys & secrets ───────────────────────────────────────
+backend/.env
+frontend/.env
+
+# ── Python ───────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+*.egg
+.venv/
+venv/
+env/
+
+# ── Node ─────────────────────────────────────────────────────
+node_modules/
+
+# ── Build output ─────────────────────────────────────────────
+frontend/dist/
+frontend/dist-ssr/
+
+# ── IDE / Editor ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── Logs ─────────────────────────────────────────────────────
+*.log

@@ -1,0 +1,2 @@
+- [theHarvester & h8mail Final State](collectors-theharvester-h8mail-final.md) — Working sources, findings counts, pipeline integration, API key config
+- [Project Architecture Overview](project-architecture-overview.md) — Complete architecture, pipeline flow, collector inventory, and known gaps

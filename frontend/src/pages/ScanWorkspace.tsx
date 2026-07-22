@@ -1,0 +1,1062 @@
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { motion, AnimatePresence } from 'framer-motion';
+import {
+  Crosshair, Loader2, Shield, AlertTriangle, ChevronRight,
+  Globe, Server, Building2, Mail, Search, Eye, CheckCircle2, XCircle,
+  Clock, Zap, ArrowRight, RotateCcw, Activity, Trash2, StopCircle,
+  Download, FileSpreadsheet, Lock, Share2,
+} from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import apiClient, { deleteScan, cancelScan, triggerOrgInfra } from '../api/client';
+import { openScanWebSocket } from '../api/ws';
+import { useScanWorkspace } from '../context/ScanWorkspaceContext';
+import { useAuth } from '../context/AuthContext';
+import { useNotification } from '../context/NotificationContext';
+import type { ScanEvent } from '../api/ws';
+import type { TabId, ScanWorkspaceState, ScanWorkspaceAction } from '../context/ScanWorkspaceContext';
+import ErrorBoundary from '../components/ErrorBoundary';
+import { InfrastructureTab } from '../components/workspace/InfrastructureTab';
+import { IdentityTab } from '../components/workspace/IdentityTab';
+import { ThreatIntelTab } from '../components/workspace/ThreatIntelTab';
+import { BrandProtectionTab } from '../components/workspace/BrandProtectionTab';
+import { SecretsTab } from '../components/workspace/SecretsTab';
+import { WebOsintTab } from '../components/workspace/WebOsintTab';
+import { PipelineProgress } from '../components/workspace/PipelineProgress';
+import CollaboratorModal from '../components/workspace/CollaboratorModal';
+
+/* ─── Types ─────────────────────────────────────────────────────────── */
+
+interface ToolEvent {
+  tool: string;
+  status: 'running' | 'completed' | 'error' | 'timeout';
+  target?: string;
+  collected?: number;
+  elapsed?: number;
+  error?: string;
+}
+
+interface PhaseEvent {
+  phase: string;
+  phase_index: number;
+  status: 'started' | 'completed';
+  result?: Record<string, unknown>;
+}
+
+interface ScanResult {
+  scan_id: string;
+  status: string;
+  total_findings?: number;
+  links_created?: number;
+  phases?: Record<string, unknown>;
+}
+
+type AppView = 'loading' | 'input' | 'pipeline' | 'results';
+
+/* ─── Tool metadata ─────────────────────────────────────────────────── */
+
+const TOOL_META: Record<string, { label: string; phase: string; icon: typeof Globe }> = {
+  crtsh: { label: 'crt.sh', phase: 'INFRASTRUCTURE', icon: Globe },
+  subfinder: { label: 'subfinder', phase: 'INFRASTRUCTURE', icon: Search },
+  theharvester: { label: 'theHarvester', phase: 'INFRASTRUCTURE', icon: Search },
+  dns_resolver: { label: 'DNS Resolver', phase: 'INFRASTRUCTURE', icon: Server },
+  shodan_internetdb: { label: 'Shodan InternetDB', phase: 'INFRASTRUCTURE', icon: Eye },
+  shodan_host: { label: 'Shodan Host', phase: 'SERVICES', icon: Eye },
+  censys_host: { label: 'Censys Host', phase: 'SERVICES', icon: Eye },
+  nvd_cve: { label: 'NVD CVE', phase: 'SERVICES', icon: AlertTriangle },
+  cisa_kev: { label: 'CISA KEV', phase: 'SERVICES', icon: Shield },
+  hunter_domain: { label: 'Hunter.io', phase: 'IDENTITY', icon: Mail },
+  xposedornot_breach: { label: 'XposedOrNot', phase: 'IDENTITY', icon: Eye },
+  h8mail: { label: 'h8mail', phase: 'IDENTITY', icon: Eye },
+  github_secrets: { label: 'GitHub Secrets', phase: 'SEARCH', icon: Search },
+  dnstwist: { label: 'dnstwist', phase: 'SEARCH', icon: Globe },
+  serper_search: { label: 'Serper Search', phase: 'SEARCH', icon: Search },
+};
+
+const PHASE_ORDER = ['INFRASTRUCTURE', 'SERVICES', 'IDENTITY', 'SEARCH'];
+
+// Each tab declares which entity_types belong to it. Adding a new
+// entity_type to the backend enums is now a one-line change here — the
+// badge counts and filter logic both read from this single source of
+// truth. The list mirrors `backend/app/schemas/enums.py:EntityType`.
+type TabConfig = { id: TabId; label: string; icon: typeof Globe; entityTypes: string[] };
+
+const TABS: TabConfig[] = [
+  {
+    id: 'infrastructure',
+    label: 'Infrastructure',
+    icon: Globe,
+    entityTypes: ['SUBDOMAIN', 'IP_ADDRESS', 'PORT_SERVICE', 'HOST_METADATA', 'DNS_RECORD', 'TLS_CERT', 'ASN_INFO', 'URL', 'DOMAIN_METADATA'],
+  },
+  {
+    id: 'identity',
+    label: 'Identity',
+    icon: Mail,
+    entityTypes: ['EMAIL', 'BREACH', 'EMAIL_PLATFORM', 'PROFILE'],
+  },
+  {
+    id: 'web-osint',
+    label: 'Web OSINT',
+    icon: Globe,
+    entityTypes: ['TECHNOLOGY', 'HTTP_HEADER', 'HISTORICAL_URL', 'WAYBACK_SNAPSHOT', 'CVE'],
+  },
+  {
+    id: 'secrets',
+    label: 'Secrets',
+    icon: Search,
+    entityTypes: ['LEAKED_SECRET', 'GITHUB_REPO', 'CREDENTIAL'],
+  },
+  {
+    id: 'threat-intel',
+    label: 'Threat Intel',
+    icon: Activity,
+    entityTypes: ['TELEGRAM_MESSAGE', 'TELEGRAM_CHANNEL', 'ONION_SITE', 'DARKWEB_MENTION'],
+  },
+  {
+    id: 'brand',
+    label: 'Brand Protection',
+    icon: Shield,
+    entityTypes: ['LOOKALIKE_DOMAIN', 'PHISHING_SITE', 'CLOUD_BUCKET', 'EXPOSED_FILE', 'DORK_RESULT'],
+  },
+];
+
+/* ─── Input view ────────────────────────────────────────────────────── */
+
+function InputView({ onSubmit, error }: { onSubmit: (d: string) => void; error: string | null }) {
+  const [domain, setDomain] = useState('');
+  return (
+    <motion.div
+      className="pipeline-input-view"
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -20 }}
+    >
+      <div className="pipeline-input-hero">
+        <motion.div
+          initial={{ scale: 0.8, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          transition={{ duration: 0.5 }}
+        >
+          <Crosshair size={48} className="pipeline-input-icon" />
+        </motion.div>
+        <h1 className="pipeline-input-title">Launch Reconnaissance</h1>
+        <p className="pipeline-input-subtitle">
+          Enter a target domain. All intelligence vectors will execute sequentially
+          with real-time results streamed as each tool completes.
+        </p>
+      </div>
+
+      <form className="pipeline-input-form" onSubmit={(e) => { e.preventDefault(); onSubmit(domain.trim()); }}>
+        <div className="pipeline-input-row">
+          <Globe size={18} style={{ color: 'var(--text-muted)' }} />
+          <input
+            type="text"
+            className="pipeline-input"
+            placeholder="utm.tn"
+            value={domain}
+            onChange={(e) => setDomain(e.target.value)}
+            autoFocus
+            spellCheck={false}
+          />
+          <motion.button
+            type="submit"
+            className="pipeline-launch-btn"
+            disabled={!domain}
+            whileHover={domain ? { scale: 1.02 } : undefined}
+            whileTap={domain ? { scale: 0.97 } : undefined}
+          >
+            <Zap size={16} />
+            <span>Launch</span>
+          </motion.button>
+        </div>
+      </form>
+
+      {error && (
+        <motion.div
+          className="pipeline-error"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+        >
+          <AlertTriangle size={16} />
+          <span>{error}</span>
+        </motion.div>
+      )}
+
+      <div className="pipeline-phases-preview">
+        {PHASE_ORDER.map((phase, i) => (
+          <motion.div
+            key={phase}
+            className="phase-preview-item"
+            initial={{ opacity: 0, x: -10 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ delay: 0.2 + i * 0.1 }}
+          >
+            <div className="phase-preview-dot" />
+            <span>{phase}</span>
+            {i < PHASE_ORDER.length - 1 && <ArrowRight size={12} className="phase-preview-arrow" />}
+          </motion.div>
+        ))}
+      </div>
+    </motion.div>
+  );
+}
+
+/* ─── Pipeline view ─────────────────────────────────────────────────── */
+
+const TARGET_TYPE_ICONS: Record<string, typeof Globe> = {
+  domain: Globe,
+  ip: Server,
+  organization: Building2,
+};
+
+const TARGET_TYPE_LABELS: Record<string, string> = {
+  domain: 'Domain',
+  ip: 'IP',
+  organization: 'Organization',
+};
+
+function PipelineView({ scanId, targetDomain, targetType = 'domain', onComplete }: {
+  scanId: string; targetDomain: string; targetType?: string; onComplete: (result: ScanResult) => void;
+}) {
+  const [tools, setTools] = useState<ToolEvent[]>([]);
+  const [phases, setPhases] = useState<PhaseEvent[]>([]);
+  const [currentPhase, setCurrentPhase] = useState('');
+  const [overallStatus, setOverallStatus] = useState<'running' | 'completed' | 'error'>('running');
+  const { addNotification } = useNotification();
+  const queryClient = useQueryClient();
+  const wsRef = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    wsRef.current = openScanWebSocket(scanId, (event: ScanEvent) => {
+      switch (event.event) {
+        case 'scan_started':
+          break;
+        case 'phase_started':
+          setCurrentPhase(event.phase as string);
+          setPhases(prev => [...prev, { phase: event.phase as string, phase_index: event.phase_index as number, status: 'started' }]);
+          break;
+        case 'phase_completed':
+          setPhases(prev => [...prev.filter(p => p.phase !== event.phase), {
+            phase: event.phase as string,
+            phase_index: event.phase_index as number,
+            status: 'completed',
+            result: event.result as Record<string, unknown> | undefined,
+          }]);
+          break;
+        case 'tool_started':
+          setTools(prev => [...prev, { tool: event.tool as string, status: 'running', target: event.target as string }]);
+          break;
+        case 'tool_completed':
+          setTools(prev => prev.map(t => t.tool === event.tool && t.status === 'running'
+            ? { ...t, status: 'completed' as const, collected: event.collected as number, elapsed: event.elapsed_seconds as number }
+            : t
+          ));
+          // Findings were persisted before this event — trigger immediate refetch
+          queryClient.invalidateQueries({ queryKey: ['scanFindings', scanId] });
+          break;
+        case 'tool_error':
+          setTools(prev => prev.map(t => t.tool === event.tool && t.status === 'running'
+            ? { ...t, status: 'error' as const, error: event.error as string }
+            : t
+          ));
+          break;
+        case 'tool_timeout':
+          setTools(prev => prev.map(t => t.tool === event.tool && t.status === 'running'
+            ? { ...t, status: 'timeout' as const, elapsed: event.elapsed_seconds as number }
+            : t
+          ));
+          break;
+        case 'scan_completed':
+          setOverallStatus('completed');
+          addNotification({
+            type: 'success',
+            title: 'Scan Complete',
+            message: `${targetDomain} — ${event.total_findings ?? '?'} findings collected`,
+          });
+          onComplete({ scan_id: scanId, status: 'COMPLETED', total_findings: event.total_findings as number, links_created: event.links_created as number, phases: event.phases as Record<string, unknown> });
+          break;
+        case 'scan_failed':
+          setOverallStatus('error');
+          addNotification({
+            type: 'error',
+            title: 'Scan Failed',
+            message: `${targetDomain} — one or more phases encountered errors`,
+          });
+          break;
+      }
+    });
+
+    return () => { wsRef.current?.close(); };
+  }, [scanId, onComplete, targetDomain, addNotification]);
+
+  const toolStatusIcon = (status: string) => {
+    switch (status) {
+      case 'running': return <Loader2 size={13} className="spin" />;
+      case 'completed': return <CheckCircle2 size={13} style={{ color: '#10b981' }} />;
+      case 'error': return <XCircle size={13} style={{ color: '#ef4444' }} />;
+      case 'timeout': return <Clock size={13} style={{ color: '#f59e0b' }} />;
+      default: return null;
+    }
+  };
+
+  return (
+    <motion.div
+      className="pipeline-view"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+    >
+      <div className="pipeline-header">
+        <div className="pipeline-target">
+          {(() => { const Icon = TARGET_TYPE_ICONS[targetType] || Globe; return <Icon size={16} />; })()}
+          <span className="pipeline-target-domain">{targetDomain}</span>
+          <span className="pipeline-type-badge">{TARGET_TYPE_LABELS[targetType] || targetType}</span>
+          <span className={`pipeline-status-badge ${overallStatus}`}>
+            {overallStatus === 'running' && <><Loader2 size={11} className="spin" /> RUNNING</>}
+            {overallStatus === 'completed' && <><CheckCircle2 size={11} /> COMPLETED</>}
+            {overallStatus === 'error' && <><XCircle size={11} /> FAILED</>}
+          </span>
+        </div>
+        <div className="pipeline-progress-bar-container">
+          <motion.div
+            className="pipeline-progress-bar-fill"
+            initial={{ width: 0 }}
+            animate={{ width: `${(phases.filter(p => p.status === 'completed').length / PHASE_ORDER.length) * 100}%` }}
+            transition={{ duration: 0.4 }}
+          />
+        </div>
+      </div>
+
+      <div className="pipeline-current-phase">
+        {currentPhase && (
+          <motion.div
+            key={currentPhase}
+            initial={{ opacity: 0, y: -5 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="current-phase-label"
+          >
+            <ChevronRight size={14} />
+            <span>{currentPhase}</span>
+          </motion.div>
+        )}
+        <button
+          style={{
+            marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6,
+            padding: '6px 14px', borderRadius: 6, fontSize: 12, fontWeight: 500,
+            border: '1px solid rgba(251,146,60,0.3)', color: '#fb923c',
+            background: 'rgba(251,146,60,0.08)', cursor: 'pointer',
+          }}
+          onClick={async () => {
+            try {
+              await cancelScan(scanId);
+            } catch (_) {}
+            wsRef.current?.close();
+            window.location.reload();
+          }}
+        >
+          <StopCircle size={14} />
+          <span>Cancel Scan</span>
+        </button>
+      </div>
+
+      <div className="pipeline-tools-stream">
+        <AnimatePresence>
+          {tools.map((tool, _idx) => {
+            const meta = TOOL_META[tool.tool] || { label: tool.tool, phase: '?', icon: Search };
+            return (
+              <motion.div
+                key={tool.tool}
+                initial={{ opacity: 0, x: -10 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0 }}
+                className={`tool-stream-item ${tool.status}`}
+              >
+                <div className="tool-stream-icon">
+                  {toolStatusIcon(tool.status)}
+                </div>
+                <div className="tool-stream-info">
+                  <span className="tool-stream-label">{meta.label}</span>
+                  {tool.target && tool.target !== targetDomain && (
+                    <span className="tool-stream-target">{tool.target}</span>
+                  )}
+                </div>
+                <div className="tool-stream-meta">
+                  {tool.elapsed !== undefined && (
+                    <span className="tool-stream-time">{tool.elapsed.toFixed(1)}s</span>
+                  )}
+                  {tool.collected !== undefined && tool.collected > 0 && (
+                    <span className="tool-stream-count">{tool.collected} found</span>
+                  )}
+                  {tool.error && (
+                    <span className="tool-stream-error">{tool.error}</span>
+                  )}
+                </div>
+              </motion.div>
+            );
+          })}
+        </AnimatePresence>
+      </div>
+
+      <PipelineProgress
+        tools={tools}
+        phases={phases}
+        currentPhase={currentPhase}
+        findingsCount={tools.reduce((sum, t) => sum + (t.collected || 0), 0)}
+      />
+    </motion.div>
+  );
+}
+
+/* ─── Results view with tabs ────────────────────────────────────────── */
+
+function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domain', onNewScan, onDelete }: {
+  scanId: string; result: ScanResult; targetDomain?: string; targetType?: string; onNewScan: () => void; onDelete?: () => void;
+}) {
+  const { state, dispatch } = useScanWorkspace();
+  const queryClient = useQueryClient();
+  const [activeTab, setActiveTab] = useState<TabId>('infrastructure');
+
+  // Compute per-tab counts from the TABS config (single source of truth).
+  // Adding a new tab is a one-line change to TABS above; this memo picks
+  // it up automatically.
+  const tabCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const tab of TABS) {
+      counts[tab.id] = state.findings.filter(f => tab.entityTypes.includes(f.entity_type)).length;
+    }
+    return counts;
+  }, [state.findings]);
+
+  // Download report via AJAX (so auth headers are sent)
+  const downloadReport = useCallback(async (format: 'csv' | 'json' | 'pdf') => {
+    try {
+      const response = await apiClient.get(`/scans/${scanId}/report?format=${format}`, {
+        responseType: 'blob',
+      });
+      const disposition = String(response.headers['content-disposition'] ?? '');
+      const match = disposition.match(/filename=([^;]+)/);
+      const filename = match ? match[1].replace(/"/g, '').trim() : `findings.${format}`;
+      const contentType = String(response.headers['content-type'] ?? 'application/octet-stream');
+      const blob = new Blob([response.data], { type: contentType });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Report export failed:', err);
+    }
+  }, [scanId]);
+
+  // Load scan data on mount
+  const { data: scanData, isLoading } = useQuery({
+    queryKey: ['scanWorkspace', scanId],
+    queryFn: async () => (await apiClient.get(`/scans/${scanId}`)).data,
+    enabled: !!scanId,
+  });
+
+  // Load findings — poll every 8s so deep-dive results appear automatically.
+  // A larger limit is used so the context has enough data for per-tab counts,
+  // while the paginated response format gives us the true total for display.
+  const FINDINGS_BATCH = 50000;
+  const { data: findingsResponse } = useQuery({
+    queryKey: ['scanFindings', scanId],
+    queryFn: async () => (await apiClient.get(`/findings/?scan_id=${scanId}&limit=${FINDINGS_BATCH}`)).data,
+    enabled: !!scanId,
+    refetchInterval: 8_000,
+  });
+
+  // Permission check
+  const { user } = useAuth();
+  const { data: permissionData } = useQuery({
+    queryKey: ['scanPermission', scanId],
+    queryFn: async () => (await apiClient.get(`/scans/${scanId}/permissions`)).data,
+    enabled: !!scanId,
+  });
+  const permission: string = permissionData?.permission ?? 'owner';
+  const isReadOnly = permission === 'read' && !permissionData?.is_admin;
+  const canManageAccess = permission === 'owner' || permissionData?.is_admin === true;
+
+  const [collabModalOpen, setCollabModalOpen] = useState(false);
+
+  useEffect(() => {
+    if (scanData) {
+      dispatch({ type: 'SCAN_LOADED', scan: scanData });
+    }
+  }, [scanData, dispatch]);
+
+  useEffect(() => {
+    if (findingsResponse) {
+      dispatch({ type: 'FINDINGS_UPDATED', findings: findingsResponse.items ?? [] });
+    }
+  }, [findingsResponse, dispatch]);
+
+  // WebSocket for live progress events (deep analysis, breach checks, etc.)
+  const wsRef = useRef<WebSocket | null>(null);
+  useEffect(() => {
+    if (!scanId) return;
+    wsRef.current = openScanWebSocket(scanId, (event: ScanEvent) => {
+      switch (event.event) {
+        // Email deep analysis progress
+        case 'email_deep_analysis_progress':
+          dispatch({ type: 'EMAIL_DEEP_ANALYSIS_PROGRESS', payload: event });
+          break;
+        case 'email_deep_analysis_completed':
+          dispatch({ type: 'EMAIL_DEEP_ANALYSIS_COMPLETED', payload: event });
+          break;
+        // Breach check progress
+        case 'breach_check_progress':
+          dispatch({ type: 'BREACH_CHECK_PROGRESS', payload: event });
+          break;
+        case 'breach_check_completed':
+          dispatch({ type: 'BREACH_CHECK_COMPLETED', payload: event });
+          break;
+        // Domain deep analysis progress
+        case 'domain_deep_analysis_progress':
+          dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_PROGRESS', payload: event });
+          break;
+        case 'domain_deep_analysis_completed':
+          dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_COMPLETED', payload: event });
+          break;
+        // A tool completed during deep analysis — refetch findings immediately
+        case 'tool_completed':
+          queryClient.invalidateQueries({ queryKey: ['scanFindings', scanId] });
+          break;
+        // Scan health — refresh scan status so the tab knows it finished
+        case 'scan_completed':
+        case 'scan_failed':
+          queryClient.invalidateQueries({ queryKey: ['scan', scanId] });
+          break;
+        // Deep analysis started event — currently InfrastructureTab dispatches
+        // this locally; handle it in WS too so other consumers can react.
+        case 'domain_deep_analysis_started':
+          dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_STARTED', domain: event.payload?.domain || '' });
+          break;
+        // Email deep analysis error — log the collector error silently
+        case 'email_deep_analysis_error':
+          break;
+      }
+    });
+
+    return () => { wsRef.current?.close(); };
+  }, [scanId, dispatch]);
+
+  const renderTab = () => {
+    switch (activeTab) {
+      case 'infrastructure': return <InfrastructureTab />;
+      case 'identity': return <IdentityTab />;
+      case 'secrets': return <SecretsTab />;
+      case 'threat-intel': return <ThreatIntelTab />;
+      case 'brand': return <BrandProtectionTab />;
+      case 'web-osint': return <WebOsintTab />;
+      default: return <InfrastructureTab />;
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="ws-container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '60vh' }}>
+        <Loader2 size={32} className="spin" style={{ color: 'var(--accent)' }} />
+      </div>
+    );
+  }
+
+  return (
+    <motion.div
+      className="pipeline-results-view"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+    >
+      <div className="results-hero">
+        <motion.div
+          initial={{ scale: 0 }}
+          animate={{ scale: 1 }}
+          transition={{ type: 'spring', stiffness: 200 }}
+        >
+          <CheckCircle2 size={48} style={{ color: '#10b981' }} />
+        </motion.div>
+        <h1>Reconnaissance Complete</h1>
+        <p className="results-subtitle">
+          {state.findings.length} of {result.total_findings} findings loaded · {result.links_created} correlations mapped
+        </p>
+        {targetDomain && (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 8 }}>
+            {(() => { const Icon = TARGET_TYPE_ICONS[targetType] || Globe; return <Icon size={14} style={{ opacity: 0.6 }} />; })()}
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-sm)', color: 'var(--text-muted)' }}>
+              {targetDomain}
+            </span>
+            <span className="pipeline-type-badge">{TARGET_TYPE_LABELS[targetType] || targetType}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Read-only banner for collaborators */}
+      {isReadOnly && (
+        <motion.div
+          initial={{ opacity: 0, height: 0 }}
+          animate={{ opacity: 1, height: 'auto' }}
+          style={{
+            margin: '0 0 16px', padding: '10px 16px', borderRadius: 'var(--radius-lg)',
+            display: 'flex', alignItems: 'center', gap: 10,
+            background: 'rgba(251,146,60,0.08)', border: '1px solid rgba(251,146,60,0.2)',
+            color: '#fb923c', fontSize: 'var(--text-sm)',
+          }}
+        >
+          <Lock size={14} />
+          <span>You have read-only access to this scan. Action buttons are hidden.</span>
+        </motion.div>
+      )}
+
+      {/* Tab navigation */}
+      <div className="ws-tabs">
+        {TABS.map(tab => {
+          const Icon = tab.icon;
+          const count = tabCounts[tab.id] || 0;
+          return (
+            <button
+              key={tab.id}
+              className={`ws-tab-btn ${activeTab === tab.id ? 'ws-tab-active' : ''}`}
+              onClick={() => setActiveTab(tab.id)}
+            >
+              <Icon size={15} />
+              <span>{tab.label}</span>
+              {count > 0 && (
+                <span style={{
+                  fontSize: 10, padding: '1px 6px', borderRadius: 10,
+                  background: activeTab === tab.id ? 'rgba(255,255,255,0.2)' : 'var(--accent-dim)',
+                  color: activeTab === tab.id ? '#fff' : 'var(--accent)',
+                  fontWeight: 600, minWidth: 18, textAlign: 'center',
+                }}>
+                  {count > 999 ? '999+' : count}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Discovered Domains card — shown for organization scans */}
+      {targetType === 'organization' && (
+        <DiscoveredDomainsCard
+          state={state}
+          dispatch={dispatch}
+          scanId={scanId}
+        />
+      )}
+
+      {/* Tab content */}
+      <div className="ws-tab-content">
+        {renderTab()}
+      </div>
+
+      <div style={{ marginTop: 24, display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>
+        {canManageAccess && (
+          <button
+            className="btn btn-secondary"
+            onClick={() => setCollabModalOpen(true)}
+            style={{ padding: '10px 14px', fontSize: 'var(--text-sm)', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+          >
+            <Share2 size={14} />
+            <span>Manage Access</span>
+          </button>
+        )}
+
+        <button className="results-btn-secondary" onClick={onNewScan}>
+          <RotateCcw size={16} />
+          <span>New Scan</span>
+        </button>
+
+        {/* Export buttons */}
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            className="btn btn-secondary"
+            onClick={() => downloadReport('csv')}
+            style={{ padding: '10px 14px', fontSize: 'var(--text-sm)', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+            title="Export as CSV"
+          >
+            <Download size={14} />
+            <span>CSV</span>
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={() => downloadReport('json')}
+            style={{ padding: '10px 14px', fontSize: 'var(--text-sm)', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+            title="Export as JSON"
+          >
+            <Download size={14} />
+            <span>JSON</span>
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={() => downloadReport('pdf')}
+            style={{ padding: '10px 14px', fontSize: 'var(--text-sm)', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+            title="Export as PDF"
+          >
+            <FileSpreadsheet size={14} />
+            <span>PDF</span>
+          </button>
+        </div>
+
+        {(result.status === 'RUNNING' || result.status === 'QUEUED' || result.status === 'PENDING') && (
+          <button
+            className="btn btn-secondary"
+            onClick={async () => {
+              try {
+                await cancelScan(scanId);
+              } catch (_) {}
+              window.location.reload();
+            }}
+            style={{ padding: '10px 16px', fontSize: 'var(--text-sm)', color: '#fb923c', borderColor: 'rgba(251,146,60,0.3)' }}
+          >
+            <StopCircle size={14} />
+            <span>Cancel Scan</span>
+          </button>
+        )}
+        {onDelete && (
+          <button className="btn btn-danger" onClick={onDelete} style={{ padding: '10px 16px', fontSize: 'var(--text-sm)' }}>
+            <Trash2 size={14} />
+            <span>Delete Scan</span>
+          </button>
+        )}
+      </div>
+
+      {/* Collaborator management modal */}
+      <CollaboratorModal
+        scanId={scanId}
+        currentUserId={user?.id || ''}
+        isOpen={collabModalOpen}
+        onClose={() => setCollabModalOpen(false)}
+      />
+    </motion.div>
+  );
+}
+
+/* ─── Discovered Domains Card (org scans) ─────────────────────────────── */
+
+function DiscoveredDomainsCard({
+  state,
+  dispatch,
+  scanId,
+}: {
+  state: ScanWorkspaceState;
+  dispatch: React.Dispatch<ScanWorkspaceAction>;
+  scanId: string | null;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const [infraRunning, setInfraRunning] = useState<string | null>(null);
+  const [infraError, setInfraError] = useState<string | null>(null);
+  const { addNotification } = useNotification();
+
+  // Extract DOMAIN_METADATA findings (discovered org domains),
+  // score them, sort by score descending.
+  const discoveredDomains = useMemo(() => {
+    const list = state.findings.filter(f => f.entity_type === 'DOMAIN_METADATA');
+    return [...list].sort((a, b) => {
+      const scoreA = (a.normalized_data as any)?.score ?? 0;
+      const scoreB = (b.normalized_data as any)?.score ?? 0;
+      return scoreB - scoreA;
+    });
+  }, [state.findings]);
+
+  // Also look for the active enrichment domain from context
+  const { activeEnrichmentDomain } = state;
+
+  if (discoveredDomains.length === 0) return null;
+
+  const handleRunInfra = async (domain: string) => {
+    if (!scanId) return;
+    setInfraRunning(domain);
+    setInfraError(null);
+    try {
+      await triggerOrgInfra(scanId, domain);
+      if (addNotification) {
+        addNotification({
+          type: 'success',
+          title: 'Infrastructure scan started',
+          message: `Running full pipeline on ${domain}`,
+        });
+      }
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || 'Failed to start infrastructure scan.';
+      setInfraError(detail);
+    } finally {
+      setInfraRunning(null);
+    }
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -8 }}
+      animate={{ opacity: 1, y: 0 }}
+      style={{
+        marginBottom: 16, borderRadius: 'var(--radius-lg)',
+        background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+        overflow: 'hidden',
+      }}
+    >
+      {/* Header */}
+      <div
+        onClick={() => setExpanded(!expanded)}
+        style={{
+          padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 8,
+          cursor: 'pointer', userSelect: 'none',
+        }}
+      >
+        <Building2 size={16} style={{ color: 'var(--cyber-purple)' }} />
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-strong)', flex: 1 }}>
+          Discovered Domains ({discoveredDomains.length})
+        </span>
+        {activeEnrichmentDomain && (
+          <span style={{
+            fontSize: 10, padding: '2px 8px', borderRadius: 10,
+            background: 'rgba(6,182,212,0.10)', border: '1px solid rgba(6,182,212,0.2)',
+            color: '#06b6d4', fontFamily: 'var(--font-mono)',
+          }}>
+            Target: {activeEnrichmentDomain}
+          </span>
+        )}
+        {expanded ? <ChevronRight size={14} style={{ transform: 'rotate(90deg)', transition: 'transform 0.2s' }} />
+          : <ChevronRight size={14} style={{ transition: 'transform 0.2s' }} />}
+      </div>
+
+      {/* Error banner */}
+      {infraError && (
+        <div style={{
+          margin: '0 16px 8px', padding: '6px 10px', borderRadius: 6,
+          display: 'flex', alignItems: 'center', gap: 6,
+          background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)',
+          fontSize: 11, color: 'var(--severity-critical)',
+        }}>
+          <AlertTriangle size={12} />
+          <span>{infraError}</span>
+        </div>
+      )}
+
+      {/* Body */}
+      {expanded && (
+        <div style={{ padding: '0 16px 12px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {discoveredDomains.map(f => {
+            const isActive = activeEnrichmentDomain === f.entity_value;
+            const score = (f.normalized_data as any)?.score ?? 0;
+            const bg = isActive ? 'rgba(6,182,212,0.08)' : 'transparent';
+            const border = isActive ? '1px solid rgba(6,182,212,0.2)' : '1px solid transparent';
+            return (
+              <div
+                key={f.id}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '6px 10px', borderRadius: 6,
+                  background: bg, border,
+                }}
+              >
+                {/* Score badge */}
+                <span style={{
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  minWidth: 28, height: 20, borderRadius: 4,
+                  fontSize: 10, fontWeight: 700, fontFamily: 'var(--font-mono)',
+                  background: score >= 70
+                    ? 'rgba(34,197,94,0.12)'
+                    : score >= 50
+                      ? 'rgba(234,179,8,0.12)'
+                      : 'rgba(239,68,68,0.08)',
+                  color: score >= 70
+                    ? '#22c55e'
+                    : score >= 50
+                      ? '#eab308'
+                      : '#ef4444',
+                }}>
+                  {score}
+                </span>
+
+                {/* Domain name */}
+                <span style={{
+                  flex: 1, fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600,
+                  color: 'var(--text-strong)',
+                }}>
+                  {f.entity_value}
+                </span>
+
+                {/* Source module */}
+                {f.source_module && (
+                  <span style={{
+                    fontSize: 9, padding: '1px 6px', borderRadius: 4,
+                    background: 'var(--bg-primary)', color: 'var(--text-muted)',
+                    fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap',
+                  }}>
+                    {f.source_module.replace(/^org_domain_discovery$/, 'search')
+                      .replace(/^reverse_whois_whoxy$/, 'whois')}
+                  </span>
+                )}
+
+                {/* Set as Target button */}
+                <button
+                  className="btn btn-secondary"
+                  style={{
+                    padding: '3px 10px', fontSize: 10,
+                    opacity: isActive ? 0.6 : 1,
+                  }}
+                  onClick={() =>
+                    dispatch({
+                      type: 'SET_ENRICHMENT_DOMAIN',
+                      domain: isActive ? null : f.entity_value,
+                    })
+                  }
+                >
+                  {isActive ? 'Active' : 'Target'}
+                </button>
+
+                {/* Run Infrastructure button */}
+                <button
+                  className="btn btn-primary"
+                  style={{
+                    padding: '3px 10px', fontSize: 10,
+                    display: 'inline-flex', alignItems: 'center', gap: 4,
+                    opacity: infraRunning === f.entity_value ? 0.7 : 1,
+                  }}
+                  onClick={() => handleRunInfra(f.entity_value)}
+                  disabled={infraRunning !== null}
+                >
+                  {infraRunning === f.entity_value ? (
+                    <>
+                      <Loader2 size={10} className="spin" />
+                      <span>Running...</span>
+                    </>
+                  ) : (
+                    <span>Run Infra</span>
+                  )}
+                </button>
+              </div>
+            );
+          })}
+          <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4, fontStyle: 'italic' }}>
+            Select a domain to use as the default target for enrichment actions, or click
+            <strong> Run Infra</strong> to start the full pipeline.
+          </div>
+        </div>
+      )}
+    </motion.div>
+  );
+}
+
+/* ─── Main export ───────────────────────────────────────────────────── */
+
+export default function ScanWorkspace() {
+  const { id: routeScanId } = useParams<{ id?: string }>();
+  const navigate = useNavigate();
+
+  const [view, setView] = useState<AppView>(routeScanId ? 'loading' : 'input');
+  const [scanId, setScanId] = useState<string | null>(routeScanId || null);
+  const [targetDomain, setTargetDomain] = useState('');
+  const [targetType, setTargetType] = useState('domain');
+  const [error, setError] = useState<string | null>(null);
+  const [scanResult, setScanResult] = useState<ScanResult | null>(null);
+  const [isExistingScan, setIsExistingScan] = useState(!!routeScanId);
+  const initialLoadDone = useRef(false);
+
+  // If viewing an existing scan, check its status and route to the right view.
+  // We start in 'loading' (not 'results') so there is never a blank frame
+  // between mount and the API response.
+  // IMPORTANT: view is deliberately excluded from the dependency array to
+  // prevent an infinite re-render loop when setView('results') fires. The
+  // initialLoadDone ref ensures this effect runs exactly once per mount.
+  useEffect(() => {
+    if (isExistingScan && scanId && !initialLoadDone.current) {
+      initialLoadDone.current = true;
+      apiClient.get(`/scans/${scanId}`).then(({ data }) => {
+        if (data.status === 'RUNNING' || data.status === 'QUEUED' || data.status === 'PENDING') {
+          setTargetDomain(data.target_domain);
+          setTargetType(data.target_type || 'domain');
+          setView('pipeline');
+        } else {
+          setTargetDomain(data.target_domain);
+          setTargetType(data.target_type || 'domain');
+          setScanResult({
+            scan_id: scanId,
+            status: data.status,
+            total_findings: data.findings_count || 0,
+            links_created: data.links_count || 0,
+          });
+          setView('results');
+        }
+      }).catch(() => {
+        initialLoadDone.current = false; // Allow retry on next render
+        setError('Failed to load scan. It may not exist.');
+        setView('input');
+      });
+    }
+  }, [isExistingScan, scanId]);
+
+  const handleSubmit = useCallback(async (domain: string) => {
+    setError(null);
+    try {
+      const { data } = await apiClient.post('/scans/initial', { target_domain: domain });
+      setScanId(data.scan.id);
+      setTargetDomain(domain);
+      setTargetType(data.scan.target_type || 'domain');
+      setIsExistingScan(false);
+      setView('pipeline');
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to launch scan';
+      setError(message);
+    }
+  }, []);
+
+  const handlePipelineComplete = useCallback((result: ScanResult) => {
+    setScanResult(result);
+    setTimeout(() => setView('results'), 1500);
+  }, []);
+
+  const handleNewScan = useCallback(() => {
+    setView('input');
+    setScanId(null);
+    setTargetDomain('');
+    setTargetType('domain');
+    setScanResult(null);
+    if (routeScanId) navigate('/scans/new');
+  }, [routeScanId, navigate]);
+
+  const handleDeleteScan = useCallback(async () => {
+    if (!scanId) return;
+    if (!window.confirm('Delete this scan and all its findings? This cannot be undone.')) return;
+    try {
+      await deleteScan(scanId);
+      navigate('/scans');
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || 'Failed to delete scan.';
+      window.alert(`Error: ${detail}`);
+    }
+  }, [scanId, navigate]);
+
+  return (
+    <div className="pipeline-page">
+      <AnimatePresence mode="wait">
+        {view === 'loading' && (
+          <motion.div
+            key="loading"
+            className="ws-container"
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '60vh' }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <Loader2 size={32} className="spin" style={{ color: 'var(--accent)' }} />
+          </motion.div>
+        )}
+        {view === 'input' && (
+          <InputView key="input" onSubmit={handleSubmit} error={error} />
+        )}
+        {view === 'pipeline' && scanId && (
+          <PipelineView key="pipeline" scanId={scanId} targetDomain={targetDomain} targetType={targetType} onComplete={handlePipelineComplete} />
+        )}
+        {view === 'results' && scanResult && (
+          <ErrorBoundary key="error-boundary-results">
+            <ResultsViewWithTabs scanId={scanId!} result={scanResult} targetDomain={targetDomain} targetType={targetType} onNewScan={handleNewScan} onDelete={handleDeleteScan} />
+          </ErrorBoundary>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}

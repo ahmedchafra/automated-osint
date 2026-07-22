@@ -1,0 +1,68 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: osint_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: osint_platform
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+    container_name: osint_api
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/osint_platform
+      REDIS_URL: redis://redis:6379/0
+      AUTO_CREATE_DB: "true"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
+    # Note: --reload is intentionally OFF. Uvicorn's autoreload triggers a
+    # graceful shutdown that hangs indefinitely while Celery workers hold open
+    # asyncpg connections. Restart the backend container manually after code
+    # changes: `docker compose restart backend worker`.
+    command: ["docker-entrypoint.sh", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    volumes:
+      - ./backend:/app
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+    container_name: osint_worker
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/osint_platform
+      REDIS_URL: redis://redis:6379/0
+      AUTO_CREATE_DB: "true"
+    depends_on:
+      - db
+      - redis
+    command: ["docker-entrypoint.sh", "celery", "-A", "app.workers.celery_app:celery_app", "worker", "--loglevel=INFO", "--concurrency=4"]
+    volumes:
+      - ./backend:/app
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: osint_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:

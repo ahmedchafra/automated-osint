@@ -1,0 +1,5 @@
+/* App.css intentionally empty.
+ * All visual styles live in index.css (design tokens + component styles)
+ * to keep the styling layer in one place. This file is kept as a no-op so
+ * `import './App.css'` in main.tsx continues to work.
+ */

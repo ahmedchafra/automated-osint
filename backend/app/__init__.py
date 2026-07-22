@@ -1,0 +1,2 @@
+"""OSINT platform application package."""
+

@@ -1,0 +1,33 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+sqlalchemy[asyncio]>=2.0.29
+asyncpg>=0.29.0
+alembic>=1.13.1
+pydantic-settings>=2.2.1
+pydantic>=2.7.0
+celery>=5.3.6
+redis>=5.0.3
+dnspython>=2.6.1
+censys-platform>=0.14.0
+httpx>=0.27.0
+aiohttp>=3.9.3
+psycopg2-binary>=2.9.9
+groq>=0.4.0
+reportlab>=3.6.0
+python-whois>=0.9.0
+pytest>=8.0.0
+holehe>=1.0
+maigret>=0.4
+PyGithub>=2.0
+telethon>=1.34
+dnstwist>=20240101
+# h8mail — free email OSINT; no HIBP key required when using built-in
+# sources (emailrep.io, scylla.sh, xposedornot, hunter.io)
+h8mail>=2.5
+# Authentication
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+bcrypt>=4.0.0,<5.0.0
+
+# Optional Tor SOCKS proxy support for the Ahmia collector
+PySocks>=1.7.1

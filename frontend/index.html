@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OSINT Platform</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <!-- cytoscape loaded from CDN because its CJS-first package
+         is incompatible with Vite 8 / Rolldown's strict ESM resolution. -->
+    <script src="https://unpkg.com/cytoscape@3/dist/cytoscape.min.js"></script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

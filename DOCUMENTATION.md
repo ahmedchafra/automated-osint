@@ -62,9 +62,10 @@ This is a **dockerized OSINT (Open Source Intelligence) platform** that automate
 | **Docker** | 24+ | [Get Docker](https://docs.docker.com/get-docker/) |
 | **Docker Compose** | v2 (included with Docker Desktop) | Comes with Docker Desktop |
 | **Git** (optional) | Any | Needed to clone the repo |
-| **RAM** | 4 GB minimum, 8 GB+ recommended | The system runs 5+ containers |
+| **RAM** | 4 GB minimum, 8 GB+ recommended | The system runs 4 containers |
 | **Disk** | 10 GB free | Docker images + database storage |
 | **OS** | Windows, macOS, or Linux | Docker Desktop on Windows/Mac; Docker Engine on Linux |
+| **Node.js** | 18+ | [nodejs.org](https://nodejs.org/) — needed for the frontend dev server |
 
 > **Windows users:** Install Docker Desktop (WSL2 backend recommended).  
 > **Linux users:** Install Docker Engine + Docker Compose plugin.
@@ -114,11 +115,24 @@ The most important collectors and their API keys:
 | Shodan | IP/port/service enumeration | `SHODAN_API_KEY` | Paid (cheap) |
 | Censys | SSL certificate / IP intelligence | `CENSYS_API_ID` + `CENSYS_API_SECRET` | Free tier |
 | Hunter.io | Domain email discovery | `HUNTER_API_KEY` | 50 free req/month |
-| VirusTotal | Domain/IP threat intel | `VT_API_KEY` | 500 lookups/day free |
-| URLScan | Screenshots + URL analysis | `URLSCAN_API_KEY` | Free rate-limited |
-| FullHunt | Attack surface enumeration | `FULLHUNT_API_KEY` | 50 queries free |
 | GitHub | Secret scanning | `GITHUB_TOKEN` | Free |
 | BuiltWith | Web technology profiler | `BUILTWITH_API_KEY` | 50 free queries ever |
+| theHarvester (29+ sources) | Email/host/subdomain harvest | Any of the keys below | Most have free tiers |
+
+The **theHarvester** collector is special — it reads **29+ separate API keys** from your `.env` and feeds them into its YAML config. Each key enables a different source (VirusTotal, URLScan, FullHunt, Shodan, Censys, etc.). You don't need all of them — theHarvester works with whatever keys you have and does more with more keys. Most have free tiers:
+
+| theHarvester Source | Env Variable | Free Tier Limit |
+|---|---|---|
+| VirusTotal | `VT_API_KEY` | 500 lookups/day |
+| URLScan | `URLSCAN_API_KEY` | Free rate-limited |
+| FullHunt | `FULLHUNT_API_KEY` | 50 queries |
+| Shodan | `SHODAN_API_KEY` | Paid |
+| Censys | `CENSYS_API_ID` + `CENSYS_API_SECRET` | 250 free credits |
+| SecurityTrails | `SECURITYTRAILS_KEY` | 50 queries/month |
+| AlienVault OTX | `OTX_API_KEY` | Free registration |
+| DNSDumpster | `DNSDUMPSTER_API_KEY` | 50 queries/day |
+| BeVigil | `BEVIGIL_API_KEY` | 50 queries/month |
+| ... and 20 more | See `backend/.env.example` | See notes |
 
 Collectors that work **without any API key**: holehe, maigret, xposedornot, crt.sh, DNS resolver, subdomain discovery, dnstwist (lookalike domains), Wayback Machine, http_headers, version_detector.
 
@@ -136,13 +150,13 @@ VITE_WS_URL=ws://localhost:8000
 
 ### 3.3 Start the Application
 
-Run everything with a single command:
+**Step 1 — Start the backend services (Docker):**
 
 ```bash
 docker-compose up -d
 ```
 
-This starts 5 containers:
+This starts 4 containers:
 
 | Container | Purpose | Port |
 |---|---|---|
@@ -150,7 +164,20 @@ This starts 5 containers:
 | `osint_redis` | Redis (message broker + cache) | 6379 |
 | `osint_api` | FastAPI backend | 8000 |
 | `osint_worker` | Celery worker (runs collectors) | — |
-| `osint_frontend` | React frontend | 5173 (dev) |
+
+**Step 2 — Start the frontend (Node.js outside Docker):**
+
+In a **separate terminal**, run:
+
+```bash
+cd frontend
+npm install   # only first time, or after pulling updates
+npm run dev
+```
+
+The frontend runs via Vite's dev server (hot-reload) on http://localhost:5173. It is **not** inside Docker — you run it with Node.js directly.
+
+> If you don't have Node.js installed, download it from [nodejs.org](https://nodejs.org/) (v18+). The frontend needs this to compile React/TypeScript.
 
 **First-time build** (takes 3–10 minutes depending on internet):
 
@@ -162,13 +189,13 @@ The `--build` flag rebuilds the Docker images from source. You only need it the 
 
 ### 3.4 Verify It's Running
 
-**Check container status:**
+**Check Docker containers:**
 
 ```bash
 docker-compose ps
 ```
 
-All 5 containers should show `Up` status.
+All 4 containers should show `Up` status. If the frontend terminal shows any errors, make sure `frontend/.env` has the correct `VITE_API_URL`.
 
 **View logs:**
 
@@ -186,6 +213,8 @@ docker-compose logs -f worker   # Just the worker
 When you open the frontend, you'll see a login/register page.
 
 ### 3.5 Stop the Application
+
+Stop the frontend by pressing **Ctrl+C** in its terminal, then stop Docker:
 
 ```bash
 docker-compose down         # Stop all containers
@@ -207,27 +236,32 @@ docker-compose up -d --build
 ## 4. Architecture (How It Works)
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                     Frontend (React)                      │
-│                   http://localhost:5173                    │
-└─────────────┬───────────────────────────────┬─────────────┘
-              │ HTTP/WS                       │
-              ▼                               ▼
-┌─────────────────────┐          ┌─────────────────────────┐
-│  FastAPI Backend    │◄────────►│     Celery Worker        │
-│  :8000              │  Redis   │  (runs collectors)       │
-│  ┌───────────────┐  │  Queue   │  ┌───────────────────┐  │
-│  │ REST API      │  │          │  │ Hunter.io         │  │
-│  │ WebSocket     │──┤          │  │ Shodan / Censys   │  │
-│  │ Auth (JWT)    │  │          │  │ theHarvester      │  │
-│  └───────────────┘  │          │  │ GitHub Secrets    │  │
-└──────────┬──────────┘          │  │ dnstwist          │  │
-           │                     │  │ BuiltWith         │  │
-           ▼                     │  │ Wayback Machine   │  │
-┌─────────────────────┐          │  │ + 25 more...      │  │
-│    PostgreSQL        │          │  └───────────────────┘  │
-│    (structured data) │          └─────────────────────────┘
-└─────────────────────┘
+┌──────────────────────────────────────────────────┐
+│           Frontend (React) — runs outside Docker   │
+│              http://localhost:5173                  │
+│         Start with: cd frontend && npm run dev      │
+└─────────────────────┬────────────────────────────┘
+                      │ HTTP / WebSocket
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   Docker Containers                          │
+│                                                             │
+│  ┌─────────────────────┐     ┌─────────────────────────┐    │
+│  │  FastAPI Backend    │◄───►│     Celery Worker        │    │
+│  │  :8000              │ REDIS│  (runs collectors)       │    │
+│  │  ┌───────────────┐  │QUEUE │  ┌───────────────────┐  │    │
+│  │  │ REST API      │  │      │  │ Hunter.io         │  │    │
+│  │  │ WebSocket     │──┤      │  │ Shodan / Censys   │  │    │
+│  │  │ Auth (JWT)    │  │      │  │ theHarvester      │  │    │
+│  │  └───────────────┘  │      │  │ GitHub Secrets    │  │    │
+│  └──────────┬──────────┘      │  │ dnstwist          │  │    │
+│             │                 │  │ BuiltWith         │  │    │
+│             ▼                 │  │ Wayback Machine   │  │    │
+│  ┌─────────────────────┐     │  │ + 25 more...      │  │    │
+│  │    PostgreSQL        │     │  └───────────────────┘  │    │
+│  │    (structured data) │     └─────────────────────────┘    │
+│  └─────────────────────┘                                     │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 **Flow for a scan:**
@@ -610,7 +644,14 @@ There are several ways to share this project. Here they are from most recommende
    cp backend/.env.example backend/.env
    # Edit backend/.env with their own API keys
    docker-compose up -d --build
+
+   # In a separate terminal, start the frontend
+   cd frontend
+   npm install
+   npm run dev
    ```
+
+**Note:** The recipient also needs **Node.js 18+** installed on their machine for the frontend.
 
 **Pros:** Recipient gets the cleanest setup, they build their own Docker images (no trust issues), easy to share updates.
 
@@ -632,11 +673,12 @@ Compress-Archive -Path "C:\path\to\osint-platform" -DestinationPath "osint-platf
 1. Unzips the file
 2. Creates `backend/.env` from `backend/.env.example`
 3. Runs `docker-compose up -d --build`
+4. Opens a **second terminal**, runs `cd frontend && npm install && npm run dev`
 
 **What to exclude from the zip:**
-- `backend/.venv/` (virtual env — will be rebuilt in Docker)
+- `backend/.venv/` (virtual env)
 - `backend/.env` (your API keys!)
-- `frontend/node_modules/` (installed in Docker)
+- `frontend/node_modules/` (the recipient will run `npm install`)
 - `backend/collectors/__pycache__/` (cache files)
 - `.git/` (Git history — optional)
 
@@ -665,8 +707,13 @@ Use this if the recipient has no internet access to download base images.
    # Load the Docker images
    docker load -i osint-images.tar
    
-   # Start everything
+   # Start the backend
    docker-compose up -d
+
+   # In a separate terminal, start the frontend
+   cd frontend
+   npm install
+   npm run dev
    ```
 
 **Pros:** No internet needed on the target machine (after initial download).
@@ -700,17 +747,21 @@ Regardless of how you share it, the recipient MUST:
 ## Appendix: Quick Reference
 
 ```bash
-# Start the app
+# Start the backend
 docker-compose up -d
 
 # Start the app (rebuild from source)
 docker-compose up -d --build
 
+# Start the frontend (separate terminal)
+cd frontend && npm run dev
+
 # View logs
 docker-compose logs -f
 docker-compose logs -f worker   # Just the worker
 
-# Stop everything
+# Stop the frontend
+# Press Ctrl+C in the frontend terminal, then:
 docker-compose down
 
 # Stop + delete all data (factory reset)

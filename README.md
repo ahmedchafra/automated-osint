@@ -57,8 +57,13 @@ cd automated-osint
 cp backend/.env.example backend/.env
 # Edit backend/.env with your API keys (see below)
 
-# Start everything
+# Start the backend (PostgreSQL, Redis, API, worker)
 docker-compose up -d --build
+
+# In a separate terminal, start the frontend (requires Node.js 18+)
+cd frontend
+npm install
+npm run dev
 ```
 
 ### Open the App
@@ -72,16 +77,27 @@ docker-compose up -d --build
 
 ## 🔧 Configuring API Keys
 
-Collectors are organized in tiers. The platform works **without any API keys** using free collectors (DNS, crt.sh, subfinder, holehe, maigret, dnstwist, Wayback Machine, etc.). For richer data, configure these free-tier keys:
+Collectors are organized in tiers. The platform works **without any API keys** using free collectors (DNS, crt.sh, subfinder, holehe, maigret, dnstwist, Wayback Machine, etc.). For richer data, configure these keys:
 
 | Key | Service | What You Get | Sign Up |
 |---|---|---|---|
 | `HUNTER_API_KEY` | Hunter.io | Domain email discovery (50 req/month free) | [hunter.io](https://hunter.io) |
-| `VT_API_KEY` | VirusTotal | Domain/IP threat intel (500/day free) | [virustotal.com](https://virustotal.com) |
 | `GITHUB_TOKEN` | GitHub | Secret scanning | [GitHub tokens](https://github.com/settings/tokens) |
 | `BUILTWITH_API_KEY` | BuiltWith | Web technology profiling (50 free) | [builtwith.com](https://builtwith.com) |
-| `URLSCAN_API_KEY` | URLScan | URL/subdomain scanning (free) | [urlscan.io](https://urlscan.io) |
 | `CENSYS_API_ID` + `CENSYS_API_SECRET` | Censys | SSL/IP intelligence (250 free credits) | [censys.io](https://censys.io) |
+
+The **theHarvester** collector is different — it uses 29+ API keys (VirusTotal, URLScan, FullHunt, Shodan, and many more). Each key you add enables another source. Most have free tiers:
+
+| theHarvester Source | Env Variable | Free Limit |
+|---|---|---|
+| VirusTotal | `VT_API_KEY` | 500 lookups/day |
+| URLScan | `URLSCAN_API_KEY` | Free rate-limited |
+| FullHunt | `FULLHUNT_API_KEY` | 50 queries |
+| SecurityTrails | `SECURITYTRAILS_KEY` | 50 queries/month |
+| OTX (AlienVault) | `OTX_API_KEY` | Free registration |
+| DNSDumpster | `DNSDUMPSTER_API_KEY` | 50 queries/day |
+| BeVigil | `BEVIGIL_API_KEY` | 50 queries/month |
+| + 20+ more | See `.env.example` | |
 
 Edit `backend/.env` with your keys, then restart:
 
@@ -186,11 +202,12 @@ Click **"Deep Analysis"** on any subdomain to fire 8 collectors + CVE cross-refe
 ## 🛠️ Commands Quick Reference
 
 ```bash
-docker-compose up -d                 # Start everything
+docker-compose up -d                 # Start backend services
 docker-compose up -d --build         # Rebuild & start (after code changes)
+cd frontend && npm run dev           # Start frontend (separate terminal)
 docker-compose logs -f               # View all logs
 docker-compose logs -f worker        # View worker logs only
-docker-compose down                  # Stop everything
+docker-compose down                  # Stop all containers
 docker-compose down -v               # Factory reset (deletes all data)
 docker-compose restart backend worker  # Restart API + worker (after .env changes)
 ```

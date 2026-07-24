@@ -296,7 +296,12 @@
       "Bash(gh auth *)",
       "Bash(git init *)",
       "Bash(git add *)",
-      "Bash(git commit -m 'Initial commit — OSINT platform *)"
+      "Bash(git commit -m 'Initial commit — OSINT platform *)",
+      "Bash(gh repo *)",
+      "Bash(git commit -m 'Add comprehensive README with badges, architecture diagram, and quick-start guide *)",
+      "Bash(git push *)",
+      "Bash(git reset *)",
+      "Bash(git commit -m 'Fix docs: frontend runs outside Docker, clean up scripts, fix API key tables *)"
     ]
   }
 }

@@ -114,7 +114,9 @@ def test_scan_websocket_stream(monkeypatch, client):
 
     app.dependency_overrides[get_scan_event_streamer] = lambda: FakeStreamer()
 
-    with client.websocket_connect("/ws/scans/abc") as websocket:
+    with client.websocket_connect(
+        "/ws/scans/abc", headers={"X-API-Key": API_KEY}
+    ) as websocket:
         first = websocket.receive_json()
         second = websocket.receive_text()
 
@@ -131,11 +133,23 @@ def test_correlation_links_are_queryable(client):
     from app.database import AsyncSessionLocal
     from app.models.finding import Finding
     from app.models.scan import Scan
+    from app.models.user import User
     from app.services.correlation import CorrelationEngine
 
     async def seed_and_correlate():
         async with AsyncSessionLocal() as session:
-            scan = Scan(target_domain="example.com", selected_vectors=["INFRASTRUCTURE"])
+            owner = User(
+                username="correlation-owner",
+                email="correlation@example.com",
+                hashed_password="not-used-in-this-test",
+            )
+            session.add(owner)
+            await session.flush()
+            scan = Scan(
+                target_domain="example.com",
+                selected_vectors=["INFRASTRUCTURE"],
+                owner_id=owner.id,
+            )
             session.add(scan)
             await session.flush()
 

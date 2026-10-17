@@ -33,8 +33,8 @@ export default function Register() {
       setError('Please enter a valid email address.');
       return;
     }
-    if (password.length < 6) {
-      setError('Password must be at least 6 characters.');
+    if (password.length < 12) {
+      setError('Password must be at least 12 characters.');
       return;
     }
     if (password !== confirm) {
@@ -177,7 +177,8 @@ export default function Register() {
               <input
                 id="password"
                 type={showPw ? 'text' : 'password'}
-                placeholder="At least 6 characters"
+                placeholder="At least 12 characters"
+                minLength={12}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 autoComplete="new-password"

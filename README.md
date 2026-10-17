@@ -60,6 +60,9 @@ cp backend/.env.example backend/.env
 # Start the backend (PostgreSQL, Redis, API, worker)
 docker-compose up -d --build
 
+# Apply the database schema
+docker compose exec backend alembic upgrade head
+
 # In a separate terminal, start the frontend (requires Node.js 18+)
 cd frontend
 npm install
@@ -113,7 +116,10 @@ docker-compose restart backend worker
 
 ### 1. Register & Log In
 
-Open the frontend, create an account, and log in. The first user is an admin.
+Open the frontend, create an account, and log in. New accounts are regular users.
+To bootstrap the first administrator, set all three `INITIAL_ADMIN_USERNAME`,
+`INITIAL_ADMIN_EMAIL`, and `INITIAL_ADMIN_PASSWORD` variables before starting the
+backend. Alternatively, promote a user with the documented administration script.
 
 ### 2. Start a Scan
 
@@ -188,7 +194,7 @@ Click **"Deep Analysis"** on any subdomain to fire 8 collectors + CVE cross-refe
 │       ├── identity/        # hunter_domain, holehe, maigret...
 │       └── secrets/         # github_secrets
 └── frontend/
-    ├── .env                 # VITE_API_URL, VITE_API_KEY
+    ├── .env                 # VITE_API_URL
     ├── src/
     │   ├── components/      # React components
     │   ├── pages/           # Route pages

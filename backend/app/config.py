@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
 
+    # Optional one-time bootstrap. When all three are present and no admin
+    # exists, the API creates the first administrator during startup.
+    INITIAL_ADMIN_USERNAME: Optional[str] = None
+    INITIAL_ADMIN_EMAIL: Optional[str] = None
+    INITIAL_ADMIN_PASSWORD: Optional[str] = None
+
     # Collector API keys — all optional so the platform boots in dev
     # even when only a subset of collectors will be exercised.
     SHODAN_API_KEY: Optional[str] = None
@@ -95,38 +101,49 @@ class Settings(BaseSettings):
     def validate_required_keys_for_production(self) -> "Settings":
         """Fail fast in production when critical secrets are missing.
 
-        In development we tolerate missing keys so a fresh checkout can boot
-        with zero external dependencies. In production we refuse to start
-        if the API key is still the dev default, or if any of the data
-        source keys are missing — those features would silently no-op.
+        Development tolerates missing integrations. Production requires strong
+        platform secrets, explicit migrations, restricted CORS, and non-default
+        database credentials. Collector keys remain intentionally optional.
         """
         if not self.is_production:
             return self
 
-        if self.API_KEY == "osint-local-dev-key-12345":
+        if self.API_KEY == "osint-local-dev-key-12345" or len(self.API_KEY) < 32:
             raise ValueError(
-                "API_KEY is still set to the development default. "
-                "Set a strong random API_KEY in the environment."
+                "API_KEY must be a non-default random value of at least 32 characters."
             )
 
-        # These keys are required for the corresponding vector to produce
-        # any findings; missing them in production would be a silent
-        # regression. List them clearly rather than dying on first call.
-        missing: list[str] = []
-        if not self.SHODAN_API_KEY:
-            missing.append("SHODAN_API_KEY")
-        if not self.HUNTER_API_KEY:
-            missing.append("HUNTER_API_KEY")
-        if not self.GROQ_API_KEY:
-            missing.append("GROQ_API_KEY")
-        if not self.SERPER_API_KEY:
-            missing.append("SERPER_API_KEY")
-
-        if missing:
+        if (
+            self.JWT_SECRET_KEY == "osint-jwt-secret-change-in-production-12345"
+            or len(self.JWT_SECRET_KEY) < 32
+        ):
             raise ValueError(
-                "Production startup refused — missing required API keys: "
-                + ", ".join(missing)
+                "JWT_SECRET_KEY must be a non-default random value of at least 32 characters."
             )
+
+        if self.AUTO_CREATE_DB:
+            raise ValueError(
+                "AUTO_CREATE_DB must be false in production; use Alembic migrations."
+            )
+
+        if "*" in self.cors_origins_list:
+            raise ValueError("Wildcard CORS origins are forbidden in production.")
+
+        if "postgres:postgres@" in self.DATABASE_URL:
+            raise ValueError("Default PostgreSQL credentials are forbidden in production.")
+
+        bootstrap_values = (
+            self.INITIAL_ADMIN_USERNAME,
+            self.INITIAL_ADMIN_EMAIL,
+            self.INITIAL_ADMIN_PASSWORD,
+        )
+        if any(bootstrap_values) and not all(bootstrap_values):
+            raise ValueError(
+                "INITIAL_ADMIN_USERNAME, INITIAL_ADMIN_EMAIL, and "
+                "INITIAL_ADMIN_PASSWORD must be provided together."
+            )
+        if self.INITIAL_ADMIN_PASSWORD and len(self.INITIAL_ADMIN_PASSWORD) < 12:
+            raise ValueError("INITIAL_ADMIN_PASSWORD must be at least 12 characters.")
 
         return self
 

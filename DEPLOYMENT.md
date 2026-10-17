@@ -25,7 +25,9 @@
 
 2. Provision API keys for the data sources you intend to use (see README table). Each can be rotated independently.
 
-3. Set `APP_ENV=production` in the backend environment so the startup validator refuses to run with missing keys or the dev default API key.
+3. Generate a separate `JWT_SECRET_KEY` of at least 32 characters and set `APP_ENV=production`. Production startup rejects default/short secrets, wildcard CORS, automatic schema creation, and the default Postgres password.
+
+4. Bootstrap an administrator by setting `INITIAL_ADMIN_USERNAME`, `INITIAL_ADMIN_EMAIL`, and `INITIAL_ADMIN_PASSWORD` together for the first deployment. Remove these values from the runtime environment after the account exists.
 
 ## Migrations
 
@@ -46,6 +48,7 @@ The current migration set:
 
 - `20260618_0002_add_target_usernames` — adds `target_usernames` to scans.
 - `20260620_0003_add_tsvector_to_findings` — adds the GIN-indexed `tsvector` column for full-text search.
+- `20261017_0006_complete_auth_schema` — adds users, ownership, collaboration, and the missing scan/auth constraints to upgraded installations.
 
 ## Running the stack
 
@@ -101,13 +104,13 @@ server {
 
 ## Key rotation
 
-The single static API key is acceptable for a single-user tool, but rotating it should not require a code change.
+The static API key is reserved for trusted service-to-service clients. Browser users authenticate with JWTs; never embed the API key in frontend builds or WebSocket URLs.
 
 1. Add the new key as an alias (future work: accept multiple keys in `Settings`).
 2. Update clients / `.env`.
 3. Remove the old key.
 
-For production multi-user setups, replace `app/core/security.py` with a JWT-based auth flow before exposing the platform publicly.
+User and collaboration data is scoped by the authenticated JWT identity. Rotate `JWT_SECRET_KEY` through a coordinated deployment because doing so invalidates existing sessions.
 
 ## Observability
 
@@ -125,10 +128,10 @@ For production multi-user setups, replace `app/core/security.py` with a JWT-base
 | Symptom | Likely cause |
 |---------|--------------|
 | `API key ... is still set to the development default` on boot | Set `APP_ENV` to anything other than `production`, or change `API_KEY` to a strong value. |
-| `Missing required API keys: ...` | Add the listed keys to `.env` or unset `APP_ENV=production`. |
+| Production configuration validation fails | Replace development secrets/default database credentials, set explicit CORS origins, and disable `AUTO_CREATE_DB`. Collector keys remain optional. |
 | Worker stays idle, scans queue but never run | `docker compose logs worker` for the actual error. Usually a missing API key for a collector. |
-| Frontend shows "401 Unauthorized" on export | The export endpoint now uses `apiClient` (X-API-Key preserved). Confirm `VITE_API_KEY` is set in `frontend/.env`. |
-| WebSocket won't connect with 1008 | API key missing or wrong. Pass `?api_key=...` in the URL or use the `Sec-WebSocket-Protocol: api-key.<value>` header. |
+| Frontend shows "401 Unauthorized" | Sign in again and confirm the browser can reach `VITE_API_URL`; the frontend never needs the service API key. |
+| WebSocket won't connect with 1008 | Confirm the session JWT is valid. Browser sockets authenticate with the `bearer.<JWT>` WebSocket subprotocol. |
 
 ## Scaling notes
 

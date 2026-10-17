@@ -38,11 +38,13 @@ def upgrade() -> None:
     """)
 
     # Create trigger
+    # asyncpg rejects multiple SQL commands in one prepared statement, so the
+    # idempotent drop and create must be executed separately.
+    op.execute("DROP TRIGGER IF EXISTS findings_search_vector_trigger ON findings")
     op.execute("""
-        DROP TRIGGER IF EXISTS findings_search_vector_trigger ON findings;
         CREATE TRIGGER findings_search_vector_trigger
         BEFORE INSERT OR UPDATE ON findings
-        FOR EACH ROW EXECUTE FUNCTION update_findings_search_vector();
+        FOR EACH ROW EXECUTE FUNCTION update_findings_search_vector()
     """)
 
     # Update existing rows

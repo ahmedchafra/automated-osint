@@ -3,7 +3,12 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, EmailStr, Field
+import re
+
+from pydantic import BaseModel, Field, field_validator
+
+
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
 class RegisterRequest(BaseModel):
@@ -11,7 +16,15 @@ class RegisterRequest(BaseModel):
 
     username: str = Field(..., min_length=3, max_length=50, pattern=r"^[a-zA-Z0-9_]+$")
     email: str = Field(..., max_length=255)
-    password: str = Field(..., min_length=6, max_length=128)
+    password: str = Field(..., min_length=12, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        candidate = value.strip().lower()
+        if not _EMAIL_RE.match(candidate):
+            raise ValueError("email must be a valid email address")
+        return candidate
 
 
 class LoginRequest(BaseModel):
@@ -69,7 +82,7 @@ class ChangePasswordRequest(BaseModel):
     """Payload for changing a user's password."""
 
     old_password: str = Field(..., min_length=1, max_length=128)
-    new_password: str = Field(..., min_length=6, max_length=128)
+    new_password: str = Field(..., min_length=12, max_length=128)
 
 
 class ScanPermissionResponse(BaseModel):

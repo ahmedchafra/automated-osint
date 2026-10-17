@@ -202,13 +202,13 @@ async def reset_user_password(
     """Admin-only: reset any user's password.
 
     Request body: { "new_password": "new-password-value" }
-    The new password must be at least 6 characters.
+    The new password must be at least 12 characters.
     """
     new_password = body.get("new_password")
-    if not new_password or not isinstance(new_password, str) or len(new_password) < 6:
+    if not new_password or not isinstance(new_password, str) or len(new_password) < 12:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="new_password must be a string with at least 6 characters",
+            detail="new_password must be a string with at least 12 characters",
         )
 
     result = await db.execute(select(User).where(User.id == user_id))

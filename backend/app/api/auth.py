@@ -1,6 +1,6 @@
 """Authentication endpoints: register, login, and user profile."""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,21 +19,30 @@ from app.core.auth import (
     hash_password,
     verify_password,
 )
+from app.core.rate_limit import enforce_rate_limit
 
 router = APIRouter()
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
-async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
+async def register(
+    body: RegisterRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     """Register a new user account.
 
     Username must be 3-50 alphanumeric characters (underscores allowed).
     Email must be a valid email address.
-    Password must be at least 6 characters.
+    Password must be at least 12 characters.
 
     New accounts are created with is_active=False and require admin approval
     before they can log in.
     """
+    await enforce_rate_limit(
+        request, bucket="register", limit=5, window_seconds=3600
+    )
+
     # Check username uniqueness
     result = await db.execute(select(User).where(User.username == body.username))
     if result.scalar_one_or_none():
@@ -69,8 +78,19 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(
+    body: LoginRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     """Authenticate with username/email and password. Returns a JWT token."""
+    await enforce_rate_limit(
+        request,
+        bucket="login",
+        limit=10,
+        window_seconds=300,
+        subject=body.username,
+    )
     # Look up by username or email
     result = await db.execute(
         select(User).where(
@@ -127,7 +147,7 @@ async def change_password(
     """Change the currently authenticated user's password.
 
     Requires the old password for verification. The new password must be
-    at least 6 characters.
+    at least 12 characters.
     """
     if not verify_password(body.old_password, current_user.hashed_password):
         raise HTTPException(

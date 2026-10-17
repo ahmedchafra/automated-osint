@@ -54,8 +54,8 @@ export default function Settings() {
       setPwMsg({ ok: false, text: 'Current password is required.' });
       return;
     }
-    if (newPassword.length < 6) {
-      setPwMsg({ ok: false, text: 'New password must be at least 6 characters.' });
+    if (newPassword.length < 12) {
+      setPwMsg({ ok: false, text: 'New password must be at least 12 characters.' });
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -285,7 +285,8 @@ export default function Settings() {
                 <input
                   id="new-password"
                   type={showNew ? 'text' : 'password'}
-                  placeholder="At least 6 characters"
+                  placeholder="At least 12 characters"
+                  minLength={12}
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                   disabled={submitting}

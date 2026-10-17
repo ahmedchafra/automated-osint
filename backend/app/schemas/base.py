@@ -6,10 +6,11 @@ matches what the database accepts and what the correlation engine emits.
 from __future__ import annotations
 
 import re
+import ipaddress
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.enums import (
     EntityType,
@@ -32,6 +33,42 @@ _DOMAIN_RE = re.compile(
     r"^(?=.{1,253}$)([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$"
 )
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+_INTERNAL_DOMAIN_SUFFIXES = (
+    ".internal", ".intranet", ".lan", ".local", ".localhost", ".home",
+)
+
+
+def _clean_domain(value: str, field_name: str = "domain") -> str:
+    candidate = value.strip().lower()
+    if not _DOMAIN_RE.match(candidate):
+        raise ValueError(
+            f"{field_name} must be a valid domain name without scheme, path, "
+            "port, or trailing dot"
+        )
+    if candidate.endswith(_INTERNAL_DOMAIN_SUFFIXES):
+        raise ValueError(f"{field_name} must be a public internet domain")
+    return candidate
+
+
+def _clean_public_ip(value: str, field_name: str = "ip") -> str:
+    try:
+        address = ipaddress.ip_address(value.strip())
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be a valid IPv4 or IPv6 address") from exc
+    if not address.is_global:
+        raise ValueError(
+            f"{field_name} must be a globally routable address; private, loopback, "
+            "link-local, multicast, reserved, and unspecified ranges are blocked"
+        )
+    return str(address)
+
+
+def _clean_email(value: str, field_name: str = "email") -> str:
+    candidate = value.strip().lower()
+    if not _EMAIL_RE.match(candidate):
+        raise ValueError(f"{field_name} must be a valid email address")
+    return candidate
 
 
 class SchemaBase(BaseModel):
@@ -50,13 +87,7 @@ class ScanCreateSimple(BaseModel):
     @field_validator("target_domain")
     @classmethod
     def _validate_domain(cls, value: str) -> str:
-        candidate = value.strip().lower()
-        if not _DOMAIN_RE.match(candidate):
-            raise ValueError(
-                "target_domain must be a valid domain name without scheme, "
-                "path, port, or trailing dot"
-            )
-        return candidate
+        return _clean_domain(value, "target_domain")
 
 
 class ScanCreate(BaseModel):
@@ -80,13 +111,7 @@ class ScanCreate(BaseModel):
     @field_validator("target_domain")
     @classmethod
     def _validate_domain(cls, value: str) -> str:
-        candidate = value.strip().lower()
-        if not _DOMAIN_RE.match(candidate):
-            raise ValueError(
-                "target_domain must be a valid domain name without scheme, "
-                "path, port, or trailing dot"
-            )
-        return candidate
+        return _clean_domain(value, "target_domain")
 
     @field_validator("target_usernames")
     @classmethod
@@ -147,13 +172,20 @@ class ScanCreateV2(BaseModel):
         description="Optional list of usernames for the USERNAME vector",
     )
 
-    @field_validator("target_value")
-    @classmethod
-    def _validate_target(cls, value: str, info) -> str:
-        candidate = value.strip()
-        if not candidate:
-            raise ValueError("target_value must not be empty")
-        return candidate
+    @model_validator(mode="after")
+    def _validate_target(self) -> "ScanCreateV2":
+        candidate = self.target_value.strip()
+        if self.target_type == TargetType.DOMAIN:
+            self.target_value = _clean_domain(candidate, "target_value")
+        elif self.target_type == TargetType.IP:
+            self.target_value = _clean_public_ip(candidate, "target_value")
+        else:
+            if any(ord(char) < 32 for char in candidate):
+                raise ValueError("organization target contains control characters")
+            if "://" in candidate:
+                raise ValueError("organization target must be a name, not a URL")
+            self.target_value = candidate
+        return self
 
     @field_validator("target_usernames")
     @classmethod
@@ -205,6 +237,10 @@ class SetPrimaryDomainRequest(BaseModel):
     """Request body for setting a scan's primary domain (org scans)."""
 
     domain: str = Field(..., min_length=1, max_length=255)
+
+    _validate_domain = field_validator("domain")(
+        lambda value: _clean_domain(value, "domain")
+    )
 
 
 class FindingResponse(SchemaBase):
@@ -270,6 +306,10 @@ class PivotRequest(BaseModel):
         description="Email address to run holehe/maigret/hibp checks on",
     )
 
+    _validate_email = field_validator("email")(
+        lambda value: _clean_email(value, "email")
+    )
+
 
 class SubdomainEnrichRequest(BaseModel):
     """Body for `POST /api/scans/{id}/enrich` — triggers Hunter + XposedOrNot on selected subdomains."""
@@ -281,6 +321,11 @@ class SubdomainEnrichRequest(BaseModel):
         description="List of subdomains to enrich (e.g. ['etudiant-isi.utm.tn', 'www.utm.tn'])",
     )
 
+    @field_validator("subdomains")
+    @classmethod
+    def _validate_subdomains(cls, values: List[str]) -> List[str]:
+        return [_clean_domain(value, "subdomain") for value in values]
+
 
 class EmailBreachRequest(BaseModel):
     """Body for `POST /api/scans/{id}/check-breaches` — triggers XposedOrNot on selected emails."""
@@ -291,6 +336,11 @@ class EmailBreachRequest(BaseModel):
         max_length=100,
         description="List of email addresses to check against breach databases",
     )
+
+    @field_validator("emails")
+    @classmethod
+    def _validate_emails(cls, values: List[str]) -> List[str]:
+        return [_clean_email(value) for value in values]
 
 
 class DeepPivotRequest(BaseModel):
@@ -319,6 +369,10 @@ class ThreatIntelRequest(BaseModel):
         description="Domain to scan for leaked secrets and lookalike domains",
     )
 
+    _validate_domain = field_validator("domain")(
+        lambda value: _clean_domain(value, "domain")
+    )
+
 
 class ShodanEnrichRequest(BaseModel):
     """Body for `POST /api/scans/{id}/shodan-enrich` — triggers Shodan and/or Censys Host API on one IP."""
@@ -334,6 +388,10 @@ class ShodanEnrichRequest(BaseModel):
         description="Which enrichment provider(s) to use: 'shodan', 'censys', or 'both'",
     )
 
+    _validate_ip = field_validator("ip")(
+        lambda value: _clean_public_ip(value, "ip")
+    )
+
 
 class CensysEnrichRequest(BaseModel):
     """Body for `POST /api/scans/{id}/censys-enrich` — triggers Censys Host API on one IP."""
@@ -342,6 +400,10 @@ class CensysEnrichRequest(BaseModel):
         ...,
         max_length=45,
         description="IPv4 or IPv6 address to enrich with Censys Host API",
+    )
+
+    _validate_ip = field_validator("ip")(
+        lambda value: _clean_public_ip(value, "ip")
     )
 
 
@@ -360,6 +422,10 @@ class DomainDeepAnalysisRequest(BaseModel):
         description='"auto" = use full mode if API keys configured, else quick. "quick" = free sources only (fast, ~30s). "full" = use all API-key sources (~900s).',
     )
 
+    _validate_domain = field_validator("domain")(
+        lambda value: _clean_domain(value, "domain")
+    )
+
 
 class DnstwistRequest(BaseModel):
     """Body for `POST /api/scans/{id}/dnstwist` — runs dnstwist lookalike detection on a domain."""
@@ -369,6 +435,10 @@ class DnstwistRequest(BaseModel):
         min_length=4,
         max_length=_MAX_DOMAIN_LENGTH,
         description="Domain to generate lookalike permutations for",
+    )
+
+    _validate_domain = field_validator("domain")(
+        lambda value: _clean_domain(value, "domain")
     )
 
 
@@ -388,6 +458,10 @@ class TelegramMonitorRequest(BaseModel):
         description="Keyword to search for (e.g. brand name, domain without TLD)",
     )
 
+    _validate_domain = field_validator("domain")(
+        lambda value: _clean_domain(value, "domain")
+    )
+
 
 class EmailDeepAnalysisRequest(BaseModel):
     """Body for `POST /api/scans/{id}/email-deep-analysis` — runs xposedornot + holehe + maigret per email."""
@@ -398,6 +472,11 @@ class EmailDeepAnalysisRequest(BaseModel):
         max_length=100,
         description="List of email addresses to deep-analyze",
     )
+
+    @field_validator("emails")
+    @classmethod
+    def _validate_emails(cls, values: List[str]) -> List[str]:
+        return [_clean_email(value) for value in values]
 
 
 class AIQueryResponse(SchemaBase):

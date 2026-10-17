@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Float, ForeignKey, JSON, String, UniqueConstraint
+from sqlalchemy import Column, Float, ForeignKey, JSON, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlalchemy.orm import relationship
 
@@ -27,7 +27,7 @@ class Finding(BaseModel):
     # Postgres-only; ignored on SQLite (no full-text search there). The
     # trigger installed by the migration keeps this populated on insert
     # and update, so callers only ever query it.
-    search_vector = Column(TSVECTOR, nullable=True)
+    search_vector = Column(TSVECTOR().with_variant(Text(), "sqlite"), nullable=True)
 
     scan = relationship("Scan", back_populates="findings")
 

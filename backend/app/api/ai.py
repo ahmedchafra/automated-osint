@@ -13,12 +13,13 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import get_api_key
+from app.core.auth import accessible_scan_ids_stmt, get_authenticated_user
 from app.database import get_db
 from app.models.ai_query import AIQuery
+from app.models.user import User
 from app.schemas.base import AIDorkRequest, AIQueryResponse
 
-router = APIRouter(dependencies=[Depends(get_api_key)])
+router = APIRouter(dependencies=[Depends(get_authenticated_user)])
 
 
 class GenerateDorkResponse(BaseModel):
@@ -58,13 +59,20 @@ async def list_ai_queries(
     scan_id: Optional[str] = None,
     limit: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_authenticated_user),
 ):
     """Return AIQuery history, optionally scoped to a scan."""
-    stmt = select(AIQuery).order_by(AIQuery.created_at.desc()).limit(limit)
+    scan_scope = accessible_scan_ids_stmt(current_user)
+    stmt = (
+        select(AIQuery)
+        .where(AIQuery.scan_id.in_(scan_scope))
+        .order_by(AIQuery.created_at.desc())
+        .limit(limit)
+    )
     if scan_id:
         stmt = (
             select(AIQuery)
-            .where(AIQuery.scan_id == scan_id)
+            .where(AIQuery.scan_id == scan_id, AIQuery.scan_id.in_(scan_scope))
             .order_by(AIQuery.created_at.desc())
             .limit(limit)
         )
@@ -73,8 +81,19 @@ async def list_ai_queries(
 
 
 @router.get("/queries/{query_id}", response_model=AIQueryResponse)
-async def get_ai_query(query_id: str, db: AsyncSession = Depends(get_db)):
-    record = await db.get(AIQuery, query_id)
+async def get_ai_query(
+    query_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_authenticated_user),
+):
+    record = (
+        await db.execute(
+            select(AIQuery).where(
+                AIQuery.id == query_id,
+                AIQuery.scan_id.in_(accessible_scan_ids_stmt(current_user)),
+            )
+        )
+    ).scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="AI query not found")
     return record

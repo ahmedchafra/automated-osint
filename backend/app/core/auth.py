@@ -12,7 +12,7 @@ from fastapi import Depends, HTTPException, Request, Security, status
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from sqlalchemy import select
+from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -68,6 +68,31 @@ def verify_token(token: str) -> dict:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
         )
+
+
+def accessible_scan_ids_stmt(current_user: User):
+    """Return a SELECT of scan IDs visible to ``current_user``.
+
+    Keeping this as a SQL subquery avoids loading every accessible scan ID
+    into Python and gives findings, links, exports, AI history, and future
+    endpoints one consistent tenant boundary.
+    """
+    from app.models.scan import Scan
+    from app.models.scan_collaborator import ScanCollaborator
+
+    stmt = select(Scan.id)
+    if current_user.role == "admin":
+        return stmt
+
+    collaborator_access = exists(
+        select(ScanCollaborator.id).where(
+            ScanCollaborator.scan_id == Scan.id,
+            ScanCollaborator.user_id == current_user.id,
+        )
+    )
+    return stmt.where(
+        or_(Scan.owner_id == current_user.id, collaborator_access)
+    )
 
 
 # ── Dependencies ────────────────────────────────────────────────────────────

@@ -23,9 +23,13 @@ async def build_findings_query(
     q: Optional[str] = None,
     skip: int = 0,
     limit: Optional[int] = None,
+    accessible_scan_ids: Optional[Select] = None,
 ) -> Select:
     """Compose the filtered `Finding` SELECT used by list + export endpoints."""
     stmt = select(Finding)
+
+    if accessible_scan_ids is not None:
+        stmt = stmt.where(Finding.scan_id.in_(accessible_scan_ids))
 
     if scan_id:
         stmt = stmt.where(Finding.scan_id == scan_id)

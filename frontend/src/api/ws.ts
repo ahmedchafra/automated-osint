@@ -20,19 +20,19 @@ export function openScanWebSocket(
   onError?: (err: Event) => void,
 ): WebSocket {
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const apiKey = import.meta.env.VITE_API_KEY as string | undefined;
+  const token = localStorage.getItem('owl_osint_token');
   const wsBase = (import.meta.env.VITE_WS_URL as string | undefined) ??
     `${wsProtocol}//${window.location.hostname}:8000`;
 
   const url = new URL(`${wsBase}/ws/scans/${scanId}`);
-  if (apiKey) url.searchParams.set('api_key', apiKey);
 
   let closed = false;
   let retries = 0;
   const MAX_RETRIES = 5;
 
   function createSocket(): WebSocket {
-    const socket = new WebSocket(url.toString());
+    const protocols = token ? [`bearer.${token}`] : undefined;
+    const socket = new WebSocket(url.toString(), protocols);
 
     socket.onmessage = (msg) => {
       try {

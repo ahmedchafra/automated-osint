@@ -1,11 +1,11 @@
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api._filters import build_findings_query
-from app.core.auth import get_authenticated_user, check_scan_access
+from app.core.auth import accessible_scan_ids_stmt, check_scan_access, get_authenticated_user
 from app.database import get_db
 from app.models.finding import Finding
 from app.models.user import User
@@ -26,6 +26,7 @@ async def get_findings(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_authenticated_user),
 ):
+    scan_scope = accessible_scan_ids_stmt(current_user)
     # Permission check: if a scan_id is specified, verify user has access
     if scan_id:
         try:
@@ -34,7 +35,9 @@ async def get_findings(
             # If the user can't access the scan, return empty results
             return PaginatedFindingsResponse(items=[], total=0, skip=skip, limit=limit)
     # Get total count matching filters
-    count_stmt = select(func.count(Finding.id))
+    count_stmt = select(func.count(Finding.id)).where(
+        Finding.scan_id.in_(scan_scope)
+    )
     if scan_id:
         count_stmt = count_stmt.where(Finding.scan_id == scan_id)
     if vector_type:
@@ -53,7 +56,7 @@ async def get_findings(
     stmt = await build_findings_query(
         db, scan_id=scan_id, vector_type=vector_type,
         entity_type=entity_type, severity=severity, q=q,
-        skip=skip, limit=limit,
+        skip=skip, limit=limit, accessible_scan_ids=scan_scope,
     )
     result = await db.execute(stmt)
     items = result.scalars().all()
@@ -85,6 +88,8 @@ async def export_findings(
     # Import here to avoid circular import (export service imports models).
     from app.services.export_service import ExportService
 
+    scan_scope = accessible_scan_ids_stmt(current_user)
+
     stmt = await build_findings_query(
         db,
         scan_id=scan_id,
@@ -92,6 +97,7 @@ async def export_findings(
         entity_type=entity_type,
         severity=severity,
         q=q,
+        accessible_scan_ids=scan_scope,
     )
     result = await db.execute(stmt)
     findings: list[Finding] = list(result.scalars().all())

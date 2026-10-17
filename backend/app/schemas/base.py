@@ -215,6 +215,7 @@ class ScanResponse(SchemaBase):
     target_domain: str
     target_type: str = "domain"
     status: ScanStatus
+    celery_task_id: Optional[str] = None
     selected_vectors: List[VectorType]
     target_usernames: List[str]
     created_at: datetime

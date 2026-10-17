@@ -82,6 +82,39 @@ def test_scan_crud_flow(client):
     assert detail["findings"] == []
 
 
+def test_cancel_scan_revokes_exact_task(monkeypatch, client):
+    headers = {"X-API-Key": API_KEY}
+    created = client.post(
+        "/api/scans",
+        headers=headers,
+        json={
+            "target_domain": "example.com",
+            "selected_vectors": ["INFRASTRUCTURE"],
+            "target_usernames": [],
+        },
+    ).json()
+    scan_id = created["scan"]["id"]
+    expected_task_id = created["task_id"]
+
+    calls = []
+    from app.workers.celery_app import celery_app
+
+    monkeypatch.setattr(
+        celery_app.control,
+        "revoke",
+        lambda task_id, **kwargs: calls.append((task_id, kwargs)),
+    )
+    response = client.post(f"/api/scans/{scan_id}/cancel", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["revoked"] is True
+    assert calls == [
+        (expected_task_id, {"terminate": True, "signal": "SIGTERM"})
+    ]
+    detail = client.get(f"/api/scans/{scan_id}", headers=headers).json()
+    assert detail["status"] == "CANCELLED"
+
+
 def test_new_collectors_are_registered():
     from collectors.registry import registry
 

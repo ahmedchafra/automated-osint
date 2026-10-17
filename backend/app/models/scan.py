@@ -10,7 +10,8 @@ class Scan(BaseModel):
     target_type = Column(
         String, nullable=False, default="domain", server_default="domain"
     )
-    status = Column(String, nullable=False, default="PENDING") # PENDING, RUNNING, COMPLETED, FAILED
+    status = Column(String, nullable=False, default="PENDING") # PENDING, RUNNING, COMPLETED, FAILED, CANCELLED
+    celery_task_id = Column(String, nullable=True, index=True)
     selected_vectors = Column(JSON, nullable=False, default=list)
     target_usernames = Column(JSON, nullable=False, default=list)
     completed_at = Column(DateTime(timezone=True), nullable=True)

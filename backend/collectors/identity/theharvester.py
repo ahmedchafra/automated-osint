@@ -44,6 +44,7 @@ import signal
 import subprocess
 import shutil
 import sys
+import tempfile
 from typing import Any, Dict, List
 
 import yaml
@@ -199,7 +200,9 @@ class TheHarvesterCollector(BaseCollector):
 
         return sources
 
-    def _build_cmd(self, theharvester_bin: str, target: str) -> list[str]:
+    def _build_cmd(
+        self, theharvester_bin: str, target: str, output_base: str
+    ) -> list[str]:
         """Build the command list to run theHarvester.
 
         Uses the wrapper script (which patches aiohttp's resolver for
@@ -210,7 +213,7 @@ class TheHarvesterCollector(BaseCollector):
             "-d", target,
             "-b", ",".join(self.sources),
             "-l", str(self.LIMIT),
-            "-f", "/tmp/theharvester_output",
+            "-f", output_base,
         ]
 
         wrapper = os.path.join(
@@ -285,23 +288,32 @@ class TheHarvesterCollector(BaseCollector):
         # Write API keys from env → theHarvester YAML before each run
         self._ensure_api_keys_yaml()
 
-        cmd = self._build_cmd(theharvester_bin, target)
+        # A fixed /tmp output name made concurrent scans read and overwrite
+        # each other's JSON/XML files. It also allowed a failed run to parse
+        # stale data from an earlier target. Give every invocation its own
+        # directory and remove it after parsing.
+        output_dir = tempfile.mkdtemp(prefix="osint-theharvester-")
+        output_base = os.path.join(output_dir, "results")
+        cmd = self._build_cmd(theharvester_bin, target, output_base)
 
         # Use synchronous subprocess to avoid the asyncio subprocess pipe hang
         # caused by Tor inheriting the subprocess file descriptors.
         loop = asyncio.get_event_loop()
-        stdout, stderr = await loop.run_in_executor(
-            None, functools.partial(self._run_subprocess, timeout=self.TIMEOUT), cmd
-        )
+        try:
+            stdout, stderr = await loop.run_in_executor(
+                None, functools.partial(self._run_subprocess, timeout=self.TIMEOUT), cmd
+            )
 
-        # Parse text output (always available)
-        text_results = self._parse_text(target, stdout)
-
-        # Also parse the structured JSON output file if it exists
-        json_results = self._parse_json_output(target)
-        xml_results = self._parse_xml_output(target)
-
-        return self._merge_results(text_results, json_results + xml_results)
+            # Parse text output (always available) plus this run's structured
+            # files. The merge applies validation and per-kind safety caps.
+            text_results = self._parse_text(target, stdout)
+            json_results = self._parse_json_output(target, output_base + ".json")
+            xml_results = self._parse_xml_output(target, output_base + ".xml")
+            return self._merge_results(
+                text_results, json_results + xml_results, domain=target
+            )
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
 
     def _run_subprocess(self, cmd: list[str], *, timeout: int) -> tuple[str, str]:
         """Run theHarvester subprocess synchronously with a process-group kill.
@@ -310,9 +322,9 @@ class TheHarvesterCollector(BaseCollector):
         start_new_session=True so that theHarvester + Tor share a process
         group. On timeout, killpg kills all processes in the group.
 
-        After the subprocess completes (successfully or on timeout), any
-        remaining Tor child processes are also cleaned up since theHarvester
-        spawns Tor but it can outlive the parent and get re-parented to PID 1.
+        A timeout kills only the subprocess's own process group. We deliberately
+        never use a broad ``pkill tor`` cleanup because the container's shared
+        Tor daemon belongs to the Ahmia collector.
 
         Args:
             cmd:     Command list to execute.
@@ -337,28 +349,6 @@ class TheHarvesterCollector(BaseCollector):
                 pass
             proc.communicate()  # drain pipes after kill
             return "", ""
-        finally:
-            # Clean up any orphaned Tor processes left by theHarvester.
-            # Tor is spawned as a child but can detach and survive after the
-            # parent theHarvester process exits, getting re-parented to PID 1.
-            # This is safe in a containerized environment where no other process
-            # needs Tor.
-            self._cleanup_tor()
-
-    def _cleanup_tor(self) -> None:
-        """Kill any remaining tor processes left by theHarvester.
-
-        Tor is spawned as a theHarvester child but can detach and outlive the
-        parent process, getting re-parented to PID 1. In a container environment
-        no other process needs Tor, so we safely clean up any orphans.
-        """
-        try:
-            subprocess.run(
-                ["pkill", "-f", "tor"],
-                capture_output=True, timeout=5,
-            )
-        except Exception:
-            pass
 
     def _parse_text(self, domain: str, output: str) -> List[Dict[str, Any]]:
         """Parse theHarvester text output into per-record findings.
@@ -506,10 +496,9 @@ class TheHarvesterCollector(BaseCollector):
 
         return results
 
-    _JSON_OUTPUT_PATH = "/tmp/theharvester_output.json"
-    _XML_OUTPUT_PATH = "/tmp/theharvester_output.xml"
-
-    def _parse_json_output(self, domain: str) -> List[Dict[str, Any]]:
+    def _parse_json_output(
+        self, domain: str, output_path: str
+    ) -> List[Dict[str, Any]]:
         """Read the JSON output file theHarvester generates via -f.
 
         The JSON has structured data for ALL sections (emails, hosts, IPs,
@@ -520,7 +509,7 @@ class TheHarvesterCollector(BaseCollector):
         """
         import json as stdlib_json
         try:
-            with open(self._JSON_OUTPUT_PATH) as f:
+            with open(output_path) as f:
                 data = stdlib_json.load(f)
         except (FileNotFoundError, stdlib_json.JSONDecodeError, OSError):
             return []
@@ -667,7 +656,9 @@ class TheHarvesterCollector(BaseCollector):
 
         return results
 
-    def _parse_xml_output(self, domain: str) -> List[Dict[str, Any]]:
+    def _parse_xml_output(
+        self, domain: str, output_path: str
+    ) -> List[Dict[str, Any]]:
         """Read the XML output file theHarvester generates via -f.
 
         The XML output contains host:IP mappings (<host><ip/><hostname/>)
@@ -676,7 +667,7 @@ class TheHarvesterCollector(BaseCollector):
         """
         import xml.etree.ElementTree as ET
         try:
-            tree = ET.parse(self._XML_OUTPUT_PATH)
+            tree = ET.parse(output_path)
             root = tree.getroot()
         except (FileNotFoundError, ET.ParseError, OSError):
             return []
@@ -750,23 +741,57 @@ class TheHarvesterCollector(BaseCollector):
         return results
 
     @staticmethod
-    def _merge_results(*result_lists: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _merge_results(
+        *result_lists: List[Dict[str, Any]], domain: str = ""
+    ) -> List[Dict[str, Any]]:
         """Deduplicate results across parsing methods.
 
         JSON output is more reliable than text parsing (structured vs regex),
         so JSON results take precedence. Dedup key: (kind, value).
         """
+        import ipaddress
+
         seen: set[tuple[str, str]] = set()
         merged: List[Dict[str, Any]] = []
+        counts: dict[str, int] = {}
+        caps = {
+            "subdomain": 500,
+            "ip": 250,
+            "email": 500,
+            "url": 500,
+            "person": 500,
+        }
+        root = domain.strip().lower().rstrip(".")
 
         for results in result_lists:
             for item in results:
                 key = (item.get("kind", ""), item.get("value", ""))
                 if not key[0] or not key[1]:
                     continue
+                kind, value = key[0], str(key[1]).strip().lower()
+                if kind == "subdomain":
+                    if value.startswith("*.") or not value.endswith("." + root):
+                        continue
+                    labels = value.split(".")
+                    if any(
+                        not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                        for label in labels
+                    ):
+                        continue
+                elif kind == "email" and not value.endswith("@" + root):
+                    continue
+                elif kind == "ip":
+                    try:
+                        if not ipaddress.ip_address(value).is_global:
+                            continue
+                    except ValueError:
+                        continue
+                if counts.get(kind, 0) >= caps.get(kind, 1000):
+                    continue
                 if key not in seen:
                     seen.add(key)
                     merged.append(item)
+                    counts[kind] = counts.get(kind, 0) + 1
 
         return merged
 

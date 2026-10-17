@@ -14,7 +14,9 @@ runs in free-only mode (24 sources, no API keys) so it finishes in
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
+import re
 import time
 
 from app.workers.celery_app import celery_app
@@ -28,6 +30,51 @@ logger = logging.getLogger("osint.initial_scan")
 
 TOOL_WATCHDOG_SECONDS = 300
 ISOLATED_TOOLS = {"subfinder", "crtsh", "dns_resolver"}
+MAX_DISCOVERY_FINDINGS_PER_SOURCE = 1000
+
+
+def _valid_subdomain(value: str, root_domain: str) -> bool:
+    """Return whether a discovered name is a syntactically valid child."""
+    value = value.strip().lower().rstrip(".")
+    root_domain = root_domain.strip().lower().rstrip(".")
+    if value.startswith("*."):
+        return False
+    if value != root_domain and not value.endswith("." + root_domain):
+        return False
+    if len(value) > 253:
+        return False
+    return all(
+        re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+        is not None
+        for label in value.split(".")
+    )
+
+
+def _public_ip(value: str) -> bool:
+    try:
+        return ipaddress.ip_address(value.strip()).is_global
+    except ValueError:
+        return False
+
+
+def _filter_discovery_findings(
+    findings: list[dict], root_domain: str
+) -> list[dict]:
+    """Reject malformed/out-of-scope discovery records and bound fan-out."""
+    filtered: list[dict] = []
+    for finding in findings:
+        entity_type = finding.get("entity_type")
+        entity_value = str(finding.get("entity_value", ""))
+        if entity_type == "SUBDOMAIN" and not _valid_subdomain(
+            entity_value, root_domain
+        ):
+            continue
+        if entity_type == "IP_ADDRESS" and not _public_ip(entity_value):
+            continue
+        filtered.append(finding)
+        if len(filtered) >= MAX_DISCOVERY_FINDINGS_PER_SOURCE:
+            break
+    return filtered
 
 
 def _run_coro_in_thread(coro_factory, *args):
@@ -160,7 +207,9 @@ async def run_domain_scan(
     resolved_ips: set[str] = set()
 
     # 1a. crt.sh — SSL certificate transparency logs
-    crtsh_findings = await _run_tool("crtsh", domain, scan_id, session, publisher)
+    crtsh_findings = _filter_discovery_findings(
+        await _run_tool("crtsh", domain, scan_id, session, publisher), domain
+    )
     total_findings += await persist_findings(session, scan_id, crtsh_findings)
     for f in crtsh_findings:
         ev = f.get("entity_value", "")
@@ -168,7 +217,9 @@ async def run_domain_scan(
             all_subdomains.add(ev)
 
     # 1b. subfinder — passive subdomain discovery
-    subfinder_findings = await _run_tool("subfinder", domain, scan_id, session, publisher)
+    subfinder_findings = _filter_discovery_findings(
+        await _run_tool("subfinder", domain, scan_id, session, publisher), domain
+    )
     total_findings += await persist_findings(session, scan_id, subfinder_findings)
     for f in subfinder_findings:
         ev = f.get("entity_value", "")
@@ -176,9 +227,12 @@ async def run_domain_scan(
             all_subdomains.add(ev)
 
     # 1c. theHarvester — email/subdomain/IP from search engines
-    theharvester_findings = await _run_tool(
-        "theharvester", domain, scan_id, session, publisher,
-        theharvester_free_only=free_only,
+    theharvester_findings = _filter_discovery_findings(
+        await _run_tool(
+            "theharvester", domain, scan_id, session, publisher,
+            theharvester_free_only=free_only,
+        ),
+        domain,
     )
     total_findings += await persist_findings(session, scan_id, theharvester_findings)
     for f in theharvester_findings:
@@ -186,8 +240,9 @@ async def run_domain_scan(
         ev = f.get("entity_value", "")
         if etype == "SUBDOMAIN" and ev:
             all_subdomains.add(ev)
-        elif etype == "IP_ADDRESS" and ev:
-            resolved_ips.add(ev)
+        # theHarvester also returns unlinked IPs from search results. Persist
+        # those as evidence, but do not fan out into network enrichment until
+        # our own DNS resolver verifies an association with this target.
 
     # 1d. DNS resolution (bounded to 200 subdomains)
     from app.services.vectors.infrastructure import MAX_DNS_SUBDOMAINS, DNS_CONCURRENCY
@@ -211,7 +266,8 @@ async def run_domain_scan(
     total_findings += await persist_findings(session, scan_id, dns_findings_all)
     for f in dns_findings_all:
         for ip in (f.get("normalized_data", {}) or {}).get("resolved_ips", []):
-            resolved_ips.add(ip)
+            if _public_ip(ip):
+                resolved_ips.add(ip)
 
     # 1e. Shodan InternetDB — free port/service lookup per IP
     for ip in sorted(resolved_ips):

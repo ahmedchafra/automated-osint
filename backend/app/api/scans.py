@@ -83,6 +83,9 @@ async def create_scan(
     await db.refresh(db_scan)
     
     async_result = execute_scan_task.delay(db_scan.id)
+    db_scan.celery_task_id = async_result.id
+    await db.commit()
+    await db.refresh(db_scan)
 
     return {
         "task_id": async_result.id,
@@ -141,6 +144,9 @@ async def create_initial_scan(
     await db.refresh(db_scan)
 
     async_result = execute_initial_scan_task.delay(db_scan.id)
+    db_scan.celery_task_id = async_result.id
+    await db.commit()
+    await db.refresh(db_scan)
 
     return {
         "task_id": async_result.id,
@@ -185,6 +191,9 @@ async def create_ip_scan(
     await db.refresh(db_scan)
 
     async_result = execute_ip_scan_task.delay(db_scan.id)
+    db_scan.celery_task_id = async_result.id
+    await db.commit()
+    await db.refresh(db_scan)
 
     return {
         "task_id": async_result.id,
@@ -220,6 +229,9 @@ async def create_org_scan(
     await db.refresh(db_scan)
 
     async_result = execute_org_scan_task.delay(db_scan.id)
+    db_scan.celery_task_id = async_result.id
+    await db.commit()
+    await db.refresh(db_scan)
 
     return {
         "task_id": async_result.id,
@@ -609,36 +621,35 @@ async def cancel_scan(
 ):
     """Cancel a running or queued scan.
 
-    Sets the scan status to FAILED so it no longer appears as active.
+    Sets the scan status to CANCELLED and revokes its exact Celery task.
     Only RUNNING, QUEUED, and PENDING scans can be cancelled.
     Requires modify permission on the scan.
     """
-    if scan.status in ("COMPLETED", "FAILED"):
+    if scan.status in ("COMPLETED", "FAILED", "CANCELLED"):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Cannot cancel a scan with status {scan.status}. Only active scans can be cancelled.",
         )
 
-    scan.status = "FAILED"
+    from datetime import datetime, timezone
+
+    scan.status = "CANCELLED"
+    scan.completed_at = datetime.now(timezone.utc)
     await db.commit()
 
-    # Attempt to revoke any matching Celery tasks for this scan
-    try:
+    revoked = False
+    if scan.celery_task_id:
         from app.workers.celery_app import celery_app
-        from celery.task.control import revoke
-        inspect = celery_app.control.inspect()
-        active_tasks = inspect.active() or {}
-        reserved_tasks = inspect.reserved() or {}
-        for worker, tasks in {**active_tasks, **reserved_tasks}.items():
-            for task in tasks:
-                task_id = task.get("id")
-                task_args = task.get("args", [])
-                if task_args and str(scan_id) in [str(a) for a in task_args]:
-                    revoke(task_id, terminate=True)
-    except Exception:
-        pass  # Best-effort revoke — don't fail if Celery is unreachable
 
-    return {"status": "cancelled", "scan_id": scan_id}
+        try:
+            celery_app.control.revoke(
+                scan.celery_task_id, terminate=True, signal="SIGTERM"
+            )
+            revoked = True
+        except Exception:
+            logger.exception("failed to revoke Celery task %s", scan.celery_task_id)
+
+    return {"status": "cancelled", "scan_id": scan_id, "revoked": revoked}
 
 
 @router.get("/{scan_id}/report")

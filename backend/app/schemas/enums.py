@@ -32,6 +32,7 @@ class EntityType(str, Enum):
     PROFILE = "PROFILE"
     DORK_RESULT = "DORK_RESULT"
     TECHNOLOGY = "TECHNOLOGY"
+    TECHNOLOGY_VERSION = "TECHNOLOGY_VERSION"
     OPEN_PORT = "OPEN_PORT"
     GITHUB_REPO = "GITHUB_REPO"
     LEAKED_SECRET = "LEAKED_SECRET"
@@ -86,6 +87,7 @@ class ScanStatus(str, Enum):
     RUNNING = "RUNNING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class TargetType(str, Enum):

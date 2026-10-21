@@ -131,7 +131,7 @@ function Topbar() {
           color: '#06b6d4', fontSize: 11, fontFamily: 'JetBrains Mono, monospace',
           letterSpacing: '0.06em'
         }}>
-          PASSIVE MODE
+          LOW-IMPACT MODE
         </span>
       </div>
     </header>

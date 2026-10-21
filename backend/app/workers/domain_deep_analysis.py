@@ -129,10 +129,16 @@ def domain_deep_analysis_task(self, scan_id: str, domain: str,
                     "collector": name, "domain": domain, "status": "running",
                 })
                 try:
-                    found = await run_collector_for_scan(
-                        name, target, scan_id, session, publisher,
-                        collector_kwargs=collector_kwargs,
-                    )
+                    # AsyncSession is not safe for concurrent use. Each
+                    # parallel collector owns and commits its own transaction;
+                    # the orchestration session is reserved for the sequential
+                    # correlation/CVE phase below.
+                    async with AsyncSessionLocal() as collector_session:
+                        found = await run_collector_for_scan(
+                            name, target, scan_id, collector_session, publisher,
+                            collector_kwargs=collector_kwargs,
+                        )
+                        await collector_session.commit()
                     count = len(found)
                     await publisher.publish(scan_id, "domain_deep_analysis_progress", {
                         "collector": name, "domain": domain, "status": "done",
@@ -161,11 +167,8 @@ def domain_deep_analysis_task(self, scan_id: str, domain: str,
             email_count, theharvester_count, secrets_count, lookalikes_count, \
                 builtwith_count, http_count, wayback_count, version_count = results
 
-            # ── Commit phase 1 findings so the frontend sees them ────
-            # Each run_collector_for_scan calls db.flush(), but the data
-            # stays in the session's pending transaction until commit().
-            # Without this commit, the frontend's 8s findings poll cannot
-            # see the results until the entire deep analysis finishes.
+            # End the orchestration transaction opened when the scan was read
+            # so subsequent statements see all collector-session commits.
             await session.commit()
 
             # ── Phase 2: Version enrichment + CVE cross-reference ────

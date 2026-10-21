@@ -29,7 +29,11 @@ export function ThreatIntelTab() {
   const repos = state.findings.filter(f => f.entity_type === 'GITHUB_REPO');
 
   const subdomains = useMemo(() =>
-    state.findings.filter(f => f.entity_type === 'SUBDOMAIN').map(f => f.entity_value),
+    state.findings
+      .filter(f => f.entity_type === 'SUBDOMAIN' && (
+        f.source_module === 'dns_resolver' || Array.isArray(f.normalized_data?.resolved_ips)
+      ))
+      .map(f => f.entity_value),
     [state.findings]
   );
 
@@ -109,7 +113,11 @@ export function ThreatIntelTab() {
   const secretsElsewhere = secrets.length > 0 || repos.length > 0;
   const hasAnyData = hasTelegram || hasDarkweb;
 
-  const domainOptions = [baseDomain, ...subdomains.filter(s => s !== baseDomain), ...orgDomains.filter(d => d !== baseDomain)];
+  const domainOptions = Array.from(new Set(
+    [baseDomain, ...subdomains, ...orgDomains]
+      .map(value => value.trim().toLowerCase())
+      .filter(value => value && !value.includes('@') && !value.startsWith('*.'))
+  ));
 
   return (
     <div className="ws-threat-intel">

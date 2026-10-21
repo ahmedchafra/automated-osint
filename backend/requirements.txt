@@ -16,6 +16,7 @@ groq>=0.4.0
 reportlab>=3.6.0
 python-whois>=0.9.0
 pytest>=8.0.0
+aiosqlite>=0.20.0
 holehe>=1.0
 maigret>=0.4
 PyGithub>=2.0

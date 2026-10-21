@@ -7,6 +7,7 @@ import {
 /* ─── Types ─────────────────────────────────────────────────────────── */
 
 interface ToolStatus {
+  id: string;
   tool: string;
   status: 'running' | 'completed' | 'error' | 'timeout';
   target?: string;
@@ -25,6 +26,7 @@ interface PipelineProgressProps {
   tools: ToolStatus[];
   phases: PhaseInfo[];
   currentPhase: string;
+  phaseOrder?: string[];
   findingsCount?: number;
 }
 
@@ -48,8 +50,6 @@ const TOOL_META: Record<string, { label: string; phase: string }> = {
   serper_search: { label: 'Serper Search', phase: 'SEARCH' },
 };
 
-const PHASE_ORDER = ['INFRASTRUCTURE', 'SERVICES', 'IDENTITY', 'SEARCH'];
-
 /* ─── Status icon helper ────────────────────────────────────────────── */
 
 function statusIcon(status: string) {
@@ -64,13 +64,16 @@ function statusIcon(status: string) {
 
 /* ─── Component ─────────────────────────────────────────────────────── */
 
-export function PipelineProgress({ tools, phases, currentPhase, findingsCount }: PipelineProgressProps) {
+export function PipelineProgress({ tools, phases, currentPhase, phaseOrder, findingsCount }: PipelineProgressProps) {
+  const displayPhases = phaseOrder && phaseOrder.length > 0
+    ? phaseOrder
+    : Array.from(new Set(phases.map(phase => phase.phase).concat(currentPhase || [])));
   const completedPhases = phases.filter(p => p.status === 'completed').length;
 
   // Pre-compute phase tool counts for display
   const phaseStats = useMemo(() => {
     const stats: Record<string, { total: number; done: number }> = {};
-    for (const phase of PHASE_ORDER) {
+    for (const phase of displayPhases) {
       const phaseTools = tools.filter(t => {
         const meta = TOOL_META[t.tool] || { phase: '?' };
         return meta.phase === phase;
@@ -81,7 +84,7 @@ export function PipelineProgress({ tools, phases, currentPhase, findingsCount }:
       };
     }
     return stats;
-  }, [tools]);
+  }, [tools, displayPhases]);
 
   return (
     <div
@@ -108,7 +111,7 @@ export function PipelineProgress({ tools, phases, currentPhase, findingsCount }:
             color: 'var(--text-muted)',
           }}
         >
-          Phase {Math.min(completedPhases + 1, PHASE_ORDER.length)}/{PHASE_ORDER.length}
+          Phase {Math.min(completedPhases + 1, Math.max(displayPhases.length, 1))}/{Math.max(displayPhases.length, 1)}
         </span>
         {findingsCount !== undefined && (
           <span
@@ -124,7 +127,7 @@ export function PipelineProgress({ tools, phases, currentPhase, findingsCount }:
       </div>
 
       {/* Phase sections */}
-      {PHASE_ORDER.map((phaseName, phaseIdx) => {
+      {displayPhases.map((phaseName, phaseIdx) => {
         const phaseInfo = phases.find(p => p.phase === phaseName);
         const isCompleted = phaseInfo?.status === 'completed';
         const isCurrent = currentPhase === phaseName;
@@ -140,7 +143,7 @@ export function PipelineProgress({ tools, phases, currentPhase, findingsCount }:
           <div
             key={phaseName}
             style={{
-              borderBottom: phaseIdx < PHASE_ORDER.length - 1 ? '1px solid var(--border)' : 'none',
+              borderBottom: phaseIdx < displayPhases.length - 1 ? '1px solid var(--border)' : 'none',
             }}
           >
             {/* Phase header */}
@@ -179,7 +182,7 @@ export function PipelineProgress({ tools, phases, currentPhase, findingsCount }:
                 const meta = TOOL_META[tool.tool] || { label: tool.tool, phase: '?' };
                 return (
                   <motion.div
-                    key={tool.tool}
+                    key={tool.id}
                     initial={{ opacity: 0, x: -8 }}
                     animate={{ opacity: 1, x: 0 }}
                     exit={{ opacity: 0, height: 0 }}

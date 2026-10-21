@@ -13,13 +13,10 @@ import {
   AlertCircle,
   ChevronRight,
 } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
 import apiClient from '../api/client';
 import { useQuery } from '@tanstack/react-query';
 
 export default function Settings() {
-  const { user } = useAuth();
-
   /* ── Change password state ──────────────────────────────── */
   const [oldPassword, setOldPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');

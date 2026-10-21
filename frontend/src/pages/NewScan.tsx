@@ -215,9 +215,9 @@ export default function NewScan() {
 
       <h1 className="ns-title">Launch Reconnaissance Operation</h1>
       <p className="ns-subtitle">
-        Initiate a passive OSINT sweep across five intelligence vectors. Each phase runs
-        non-invasively — no packets touch the target host. Results stream into the workspace
-        for manual pivot approval.
+        Initiate a low-impact OSINT sweep across multiple intelligence vectors. Most sources
+        are third-party datasets, while DNS and selected HTTP collectors may contact target
+        infrastructure. Results stream into the workspace for manual pivot approval.
       </p>
 
       <form className="ns-form-card" onSubmit={handleSubmit}>
@@ -352,8 +352,8 @@ export default function NewScan() {
       <div className="ns-note">
         <Shield size={16} />
         <span>
-          All scans are passive and require manual pivot approval before any active
-          enrichment. No traffic is sent to the target origin.
+          Scans prioritize public and low-impact sources. Some DNS, HTTP, and account checks
+          contact target-related services, so only scan targets you are authorized to investigate.
         </span>
       </div>
     </div>

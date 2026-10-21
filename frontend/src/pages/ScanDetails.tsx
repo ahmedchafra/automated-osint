@@ -41,6 +41,11 @@ interface Filters {
   search: string;
 }
 
+interface FindingsPage {
+  items: FindingRow[];
+  total: number;
+}
+
 const EMPTY_FILTERS: Filters = {
   severity: '',
   vector_type: '',
@@ -130,32 +135,39 @@ function ScanDetails() {
     enabled: !!id,
   });
 
-  const fetchFindings = async (): Promise<FindingRow[]> => {
-    if (!id) return [];
-    const params = buildFindingsQuery(id, filters);
+  // Debounce full-text search so the API is not queried on every keystroke.
+  const [debouncedSearch, setDebouncedSearch] = useState(filters.search);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(filters.search), 350);
+    return () => clearTimeout(timer);
+  }, [filters.search]);
+  const effectiveFilters = useMemo(
+    () => ({ ...filters, search: debouncedSearch }),
+    [filters, debouncedSearch],
+  );
+
+  const fetchFindings = async (): Promise<FindingsPage> => {
+    if (!id) return { items: [], total: 0 };
+    const params = buildFindingsQuery(id, effectiveFilters);
+    params.set('limit', '5000');
     const response = await apiClient.get(`/findings/?${params.toString()}`);
-    return response.data.items ?? response.data;
+    return {
+      items: response.data.items ?? response.data,
+      total: response.data.total ?? (response.data.items ?? response.data).length,
+    };
   };
 
   const {
-    data: findings,
+    data: findingsPage,
     isLoading: findingsLoading,
-  } = useQuery<FindingRow[]>({
-    queryKey: ['findings', id, filters],
+  } = useQuery<FindingsPage>({
+    queryKey: ['findings', id, effectiveFilters],
     queryFn: fetchFindings,
     refetchInterval: () => (isRunningState(scan?.status) ? 3000 : false),
     enabled: !!scan,
   });
 
   const isRunning = isRunningState(scan?.status);
-
-  // Debounce the search text by 350ms so we don't refetch tsvector on every keystroke.
-  const [debouncedSearch, setDebouncedSearch] = useState(filters.search);
-  useEffect(() => {
-    const t = setTimeout(() => setDebouncedSearch(filters.search), 350);
-    return () => clearTimeout(t);
-  }, [filters.search]);
-  const effectiveFilters = useMemo(() => ({ ...filters, search: debouncedSearch }), [filters, debouncedSearch]);
 
   useEffect(() => {
     if (!id || !isRunning) {
@@ -249,8 +261,8 @@ function ScanDetails() {
     );
   }
 
-  const typedFindings = findings ?? [];
-  const totalFindings = typedFindings.length;
+  const typedFindings = findingsPage?.items ?? [];
+  const totalFindings = findingsPage?.total ?? typedFindings.length;
 
   const vectorOptions = Array.from(new Set(typedFindings.map((f) => f.vector_type))).sort();
   const entityTypeOptions = Array.from(new Set(typedFindings.map((f) => f.entity_type))).sort();
@@ -460,7 +472,7 @@ function ScanDetails() {
       <div className="card" style={{ padding: 0 }}>
         <FindingsTable
           findings={typedFindings}
-          isLoading={findingsLoading && !findings}
+          isLoading={findingsLoading && !findingsPage}
           emptyMessage={
             isRunning
               ? 'Waiting for first results from the worker…'

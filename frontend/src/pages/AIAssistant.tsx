@@ -37,14 +37,6 @@ interface AIQueryRecord {
   created_at: string;
 }
 
-const SUGGESTIONS = [
-  'Find exposed login pages for example.com',
-  'Find .git directories exposed on the target',
-  'Find admin panels running on subdomains',
-  'Find PDF documents leaking internal data',
-  'Find S3 buckets or cloud storage linked from the target',
-];
-
 const containerVariants = {
   hidden: { opacity: 0 },
   visible: {
@@ -101,7 +93,7 @@ function AIAssistant({ scanId }: AIAssistantProps) {
     refetchInterval: () => (activeJob ? 2500 : false),
   });
 
-  const { data: scan } = useQuery<{ status: string }>({
+  const { data: scan } = useQuery<{ status: string; target_domain: string }>({
     queryKey: ['scan', actualScanId],
     queryFn: async () => (await apiClient.get(`/scans/${actualScanId}`)).data,
     enabled: !!actualScanId,
@@ -194,6 +186,16 @@ function AIAssistant({ scanId }: AIAssistantProps) {
   };
 
   const recent = useMemo(() => queries ?? [], [queries]);
+  const suggestions = useMemo(() => {
+    const target = scan?.target_domain || 'the target';
+    return [
+      `Find exposed login pages for ${target}`,
+      `Find .git directories exposed on ${target}`,
+      `Find admin panels on subdomains of ${target}`,
+      `Find PDF documents linked to ${target} that may expose internal data`,
+      `Find cloud storage linked to ${target}`,
+    ];
+  }, [scan?.target_domain]);
 
   if (!actualScanId) {
     return (
@@ -402,7 +404,7 @@ function AIAssistant({ scanId }: AIAssistantProps) {
               Quick suggestions
             </label>
             <div className="flex flex-wrap gap-2">
-              {SUGGESTIONS.map((s, i) => (
+              {suggestions.map((s, i) => (
                 <motion.button
                   key={s}
                   type="button"

@@ -282,6 +282,7 @@ function Dashboard() {
 
       {/* ── Scans by Type ──────────────────────────────────────────── */}
       <motion.div
+        className="dashboard-three-grid"
         variants={cardVariants}
         style={{
           display: 'grid',
@@ -330,6 +331,7 @@ function Dashboard() {
 
       {/* ── Quick Actions ──────────────────────────────────────── */}
       <motion.div
+        className="dashboard-three-grid"
         variants={cardVariants}
         style={{
           display: 'grid',
@@ -597,7 +599,7 @@ function Dashboard() {
           )}
         </div>
         {queueStats ? (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+          <div className="dashboard-queue-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
             <div className="card" style={{ padding: '12px 16px', textAlign: 'center', borderLeft: '3px solid var(--accent)' }}>
               <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-strong)' }}>{queueStats.worker_count || 0}</div>
               <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>Workers</div>

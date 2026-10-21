@@ -21,7 +21,16 @@ export function InfrastructureTab() {
   const [showRawWhois, setShowRawWhois] = useState(false);
 
   const mainDomain = state.scan?.target_domain || '';
-  const subdomains = state.findings.filter(f => f.entity_type === 'SUBDOMAIN');
+  const subdomains = useMemo(() => {
+    const byValue = new Map<string, typeof state.findings[number]>();
+    for (const finding of state.findings.filter(f => f.entity_type === 'SUBDOMAIN')) {
+      const existing = byValue.get(finding.entity_value);
+      if (!existing || finding.source_module === 'dns_resolver') {
+        byValue.set(finding.entity_value, finding);
+      }
+    }
+    return Array.from(byValue.values());
+  }, [state.findings]);
   const allIps = state.findings.filter(f => f.entity_type === 'IP_ADDRESS');
   const ports = state.findings.filter(f => f.entity_type === 'PORT_SERVICE');
   const cves = state.findings.filter(f => f.entity_type === 'CVE');
@@ -151,7 +160,6 @@ export function InfrastructureTab() {
       const resolved = f.normalized_data?.resolved_ips;
       if (Array.isArray(resolved)) ips.push(...resolved);
     }
-    if (ips.length === 0) return allIps.map(f => f.entity_value);
     return [...new Set(ips)];
   };
 
@@ -192,11 +200,11 @@ export function InfrastructureTab() {
         padding: '12px 16px',
         marginBottom: 16,
       }}>
-        <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center justify-between mb-2 ws-infra-toolbar">
           <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-strong)' }}>
             Subdomains ({subdomains.length})
           </span>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 ws-infra-controls">
             {sourceModules.length > 1 && (
               <div className="flex items-center gap-1 px-2 py-1" style={{
                 background: 'var(--bg-primary)',
@@ -219,7 +227,7 @@ export function InfrastructureTab() {
                 </select>
               </div>
             )}
-            <div className="flex items-center gap-2 px-3 py-1" style={{
+            <div className="flex items-center gap-2 px-3 py-1 ws-infra-search" style={{
               background: 'var(--bg-primary)',
               border: '1px solid var(--border)',
               borderRadius: 6,
@@ -237,7 +245,7 @@ export function InfrastructureTab() {
               />
             </div>
             {totalPages > 1 && (
-              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              <span className="ws-infra-page-count" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                 Page {page + 1}/{totalPages}
               </span>
             )}
@@ -260,9 +268,9 @@ export function InfrastructureTab() {
               <ShieldCheck size={13} /> Registration Info
             </div>
             <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'baseline' }}>
-              {nd.registrar && <span>Registrar: <strong style={{ color: 'var(--text-strong)' }}>{String(nd.registrar)}</strong></span>}
-              {nd.creation_date && <span>Created: <strong style={{ color: 'var(--text-strong)' }}>{String(nd.creation_date).split('T')[0]}</strong></span>}
-              {nd.expiration_date && (
+              {nd.registrar != null && <span>Registrar: <strong style={{ color: 'var(--text-strong)' }}>{String(nd.registrar)}</strong></span>}
+              {nd.creation_date != null && <span>Created: <strong style={{ color: 'var(--text-strong)' }}>{String(nd.creation_date).split('T')[0]}</strong></span>}
+              {nd.expiration_date != null && (
                 <span>Expires: <strong style={{
                   color: String(nd.expiration_date).split('T')[0] < new Date().toISOString().split('T')[0] ? '#ef4444' : 'var(--text-strong)'
                 }}>{String(nd.expiration_date).split('T')[0]}</strong></span>
@@ -273,7 +281,7 @@ export function InfrastructureTab() {
                 </strong></span>
               )}
             </div>
-            {nd.raw_whois && (
+            {nd.raw_whois != null && (
               <div style={{ marginTop: 6 }}>
                 <button
                   className="ws-enrich-btn"
@@ -377,7 +385,9 @@ export function InfrastructureTab() {
               const hasDeepResults = state.domainDeepAnalysisDomain === sub.entity_value;
               const dnsRecordsForSub = getDnsRecordsForSubdomain(sub.entity_value);
               const subHostMeta = hostMeta.filter(h => ips.includes(h.entity_value));
-              const subTlsCerts = tlsCerts.filter(t => ips.includes(t.normalized_data?.ip));
+              const subTlsCerts = tlsCerts.filter(t =>
+                typeof t.normalized_data?.ip === 'string' && ips.includes(t.normalized_data.ip)
+              );
               // Crtsh certs whose subdomains_covered includes this subdomain
               const crtshCerts = tlsCerts.filter(t =>
                 t.source_module === 'crtsh' &&
@@ -389,11 +399,13 @@ export function InfrastructureTab() {
                   key={sub.id}
                   subdomain={sub.entity_value}
                   sourceModule={sub.source_module}
-                  discoverySource={sub.normalized_data?.discovery_source}
+                  discoverySource={typeof sub.normalized_data?.discovery_source === 'string'
+                    ? sub.normalized_data.discovery_source
+                    : undefined}
                   ips={ips}
                   ports={ips.flatMap(ip => getPortsForIp(ip))}
                   cves={subCves}
-                  dnsRecords={dnsRecordsForSub}
+                  dnsRecords={dnsRecordsForSub as Record<string, string[]> | null}
                   hostMeta={subHostMeta}
                   tlsCerts={subTlsCerts}
                   crtshCerts={crtshCerts}

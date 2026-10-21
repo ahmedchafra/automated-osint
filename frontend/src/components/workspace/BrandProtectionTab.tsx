@@ -29,7 +29,11 @@ export function BrandProtectionTab() {
   );
 
   const subdomains = useMemo(() =>
-    state.findings.filter(f => f.entity_type === 'SUBDOMAIN').map(f => f.entity_value),
+    state.findings
+      .filter(f => f.entity_type === 'SUBDOMAIN' && (
+        f.source_module === 'dns_resolver' || Array.isArray(f.normalized_data?.resolved_ips)
+      ))
+      .map(f => f.entity_value),
     [state.findings]
   );
 
@@ -39,7 +43,11 @@ export function BrandProtectionTab() {
   );
 
   const baseDomain = state.scan?.target_domain || '';
-  const domainOptions = [baseDomain, ...subdomains.filter(s => s !== baseDomain), ...orgDomains.filter(d => d !== baseDomain)];
+  const domainOptions = Array.from(new Set(
+    [baseDomain, ...subdomains, ...orgDomains]
+      .map(value => value.trim().toLowerCase())
+      .filter(value => value && !value.includes('@') && !value.startsWith('*.'))
+  ));
 
   const liveCount = lookalikes.filter(l => {
     const d = (l.normalized_data || {}) as Record<string, any>;

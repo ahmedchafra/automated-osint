@@ -1,41 +1,24 @@
 #!/bin/bash
-# Entrypoint that ensures tools are installed before starting the app.
-# Downloads subfinder if not present (handles Docker build network issues).
-# Installs theHarvester from GitHub (not on PyPI under its name).
+# Entrypoint that verifies image-baked tools before starting the app.
 # Starts the Tor daemon if installed (used by the Ahmia dark-web collector).
 
 set -e
 
 # ── Subfinder ──────────────────────────────────────────────────────────────
 
-SUBFINDER_BIN="/usr/local/bin/subfinder"
-SUBFINDER_URL="https://github.com/projectdiscovery/subfinder/releases/download/v2.6.7/subfinder_2.6.7_linux_amd64.zip"
-
-if [ ! -f "$SUBFINDER_BIN" ]; then
-    echo "[entrypoint] Installing subfinder..."
-    TMP_ZIP=$(mktemp /tmp/subfinder.XXXXXX.zip)
-    curl -sL --connect-timeout 15 --max-time 120 "$SUBFINDER_URL" -o "$TMP_ZIP"
-    unzip -o "$TMP_ZIP" -d /usr/local/bin/
-    chmod +x /usr/local/bin/subfinder
-    rm -f "$TMP_ZIP"
-    echo "[entrypoint] Subfinder installed: $(subfinder -version 2>&1 | head -1)"
+if command -v subfinder >/dev/null 2>&1; then
+    echo "[entrypoint] Subfinder available: $(subfinder -version 2>&1 | head -1)"
 else
-    echo "[entrypoint] Subfinder already installed: $(subfinder -version 2>&1 | head -1)"
+    echo "[entrypoint] WARNING: subfinder not found; collector will be unavailable"
 fi
 
 # ── theHarvester ───────────────────────────────────────────────────────────
-# NOTE: The PyPI package "theHarvester" is a DIFFERENT project (version 0.0.1
-# stub). The real theHarvester by laramies must be installed from GitHub.
-if ! command -v theHarvester >/dev/null 2>&1; then
-    echo "[entrypoint] Installing theHarvester from GitHub (master)..."
-    pip install --no-cache-dir git+https://github.com/laramies/theHarvester.git@master 2>&1 | tail -3
-    if command -v theHarvester >/dev/null 2>&1; then
-        echo "[entrypoint] theHarvester installed: $(theHarvester --version 2>&1 | head -1 || echo 'OK')"
-    else
-        echo "[entrypoint] WARNING: theHarvester install failed — collector will be unavailable"
-    fi
+# theHarvester is pinned and installed during the image build. Startup only
+# verifies availability so it cannot drift with upstream changes.
+if command -v theHarvester >/dev/null 2>&1; then
+    echo "[entrypoint] theHarvester available"
 else
-    echo "[entrypoint] theHarvester already installed"
+    echo "[entrypoint] WARNING: theHarvester not found; collector will be unavailable"
 fi
 
 # ── h8mail ─────────────────────────────────────────────────────────────────

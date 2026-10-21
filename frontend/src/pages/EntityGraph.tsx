@@ -232,7 +232,7 @@ function EntityGraph({ scanId }: EntityGraphProps) {
     queryKey: ['entity-links', actualScanId],
     queryFn: async () => {
       if (!actualScanId) return [];
-      const response = await apiClient.get(`/links/?scan_id=${actualScanId}`);
+      const response = await apiClient.get(`/links/?scan_id=${actualScanId}&limit=5000`);
       return response.data;
     },
     enabled: !!actualScanId,
@@ -242,7 +242,7 @@ function EntityGraph({ scanId }: EntityGraphProps) {
     queryKey: ['scan-findings', actualScanId],
     queryFn: async () => {
       if (!actualScanId) return [];
-      const response = await apiClient.get(`/findings/?scan_id=${actualScanId}&limit=1000`);
+      const response = await apiClient.get(`/findings/?scan_id=${actualScanId}&limit=5000`);
       return response.data.items ?? response.data;
     },
     enabled: !!actualScanId,
@@ -372,10 +372,10 @@ function EntityGraph({ scanId }: EntityGraphProps) {
             selector: 'node:selected',
             style: {
               'border-width': 4,
-              'border-color': 'var(--accent)',
+              'border-color': '#06b6d4',
               'border-opacity': 1,
               'background-blacken': -0.15,
-              'overlay-color': 'var(--accent)',
+              'overlay-color': '#06b6d4',
               'overlay-opacity': 0.15,
             },
           },
@@ -399,7 +399,6 @@ function EntityGraph({ scanId }: EntityGraphProps) {
           },
         ],
         layout: { name: layoutName, animate: true, animationDuration: 500 } as any,
-        wheelSensitivity: 0.2,
       });
 
       const cy = cyRef.current;

@@ -3,8 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Crosshair, Loader2, Shield, AlertTriangle, ChevronRight,
-  Globe, Server, Building2, Mail, Search, Eye, CheckCircle2, XCircle,
-  Clock, Zap, ArrowRight, RotateCcw, Activity, Trash2, StopCircle,
+  Globe, Server, Building2, Mail, Search, CheckCircle2, XCircle,
+  Zap, ArrowRight, RotateCcw, Activity, Trash2, StopCircle,
   Download, FileSpreadsheet, Lock, Share2,
 } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -28,6 +28,7 @@ import CollaboratorModal from '../components/workspace/CollaboratorModal';
 /* ─── Types ─────────────────────────────────────────────────────────── */
 
 interface ToolEvent {
+  id: string;
   tool: string;
   status: 'running' | 'completed' | 'error' | 'timeout';
   target?: string;
@@ -54,24 +55,6 @@ interface ScanResult {
 type AppView = 'loading' | 'input' | 'pipeline' | 'results';
 
 /* ─── Tool metadata ─────────────────────────────────────────────────── */
-
-const TOOL_META: Record<string, { label: string; phase: string; icon: typeof Globe }> = {
-  crtsh: { label: 'crt.sh', phase: 'INFRASTRUCTURE', icon: Globe },
-  subfinder: { label: 'subfinder', phase: 'INFRASTRUCTURE', icon: Search },
-  theharvester: { label: 'theHarvester', phase: 'INFRASTRUCTURE', icon: Search },
-  dns_resolver: { label: 'DNS Resolver', phase: 'INFRASTRUCTURE', icon: Server },
-  shodan_internetdb: { label: 'Shodan InternetDB', phase: 'INFRASTRUCTURE', icon: Eye },
-  shodan_host: { label: 'Shodan Host', phase: 'SERVICES', icon: Eye },
-  censys_host: { label: 'Censys Host', phase: 'SERVICES', icon: Eye },
-  nvd_cve: { label: 'NVD CVE', phase: 'SERVICES', icon: AlertTriangle },
-  cisa_kev: { label: 'CISA KEV', phase: 'SERVICES', icon: Shield },
-  hunter_domain: { label: 'Hunter.io', phase: 'IDENTITY', icon: Mail },
-  xposedornot_breach: { label: 'XposedOrNot', phase: 'IDENTITY', icon: Eye },
-  h8mail: { label: 'h8mail', phase: 'IDENTITY', icon: Eye },
-  github_secrets: { label: 'GitHub Secrets', phase: 'SEARCH', icon: Search },
-  dnstwist: { label: 'dnstwist', phase: 'SEARCH', icon: Globe },
-  serper_search: { label: 'Serper Search', phase: 'SEARCH', icon: Search },
-};
 
 const PHASE_ORDER = ['INFRASTRUCTURE', 'SERVICES', 'IDENTITY', 'SEARCH'];
 
@@ -220,16 +203,22 @@ function PipelineView({ scanId, targetDomain, targetType = 'domain', onComplete 
 }) {
   const [tools, setTools] = useState<ToolEvent[]>([]);
   const [phases, setPhases] = useState<PhaseEvent[]>([]);
+  const [declaredPhases, setDeclaredPhases] = useState<string[]>([]);
   const [currentPhase, setCurrentPhase] = useState('');
   const [overallStatus, setOverallStatus] = useState<'running' | 'completed' | 'error'>('running');
   const { addNotification } = useNotification();
   const queryClient = useQueryClient();
   const wsRef = useRef<WebSocket | null>(null);
+  const toolSequence = useRef(0);
 
   useEffect(() => {
-    wsRef.current = openScanWebSocket(scanId, (event: ScanEvent) => {
+    const connectTimer = window.setTimeout(() => {
+      wsRef.current = openScanWebSocket(scanId, (event: ScanEvent) => {
       switch (event.event) {
         case 'scan_started':
+          if (Array.isArray(event.phases)) {
+            setDeclaredPhases(event.phases.filter((phase): phase is string => typeof phase === 'string'));
+          }
           break;
         case 'phase_started':
           setCurrentPhase(event.phase as string);
@@ -244,27 +233,30 @@ function PipelineView({ scanId, targetDomain, targetType = 'domain', onComplete 
           }]);
           break;
         case 'tool_started':
-          setTools(prev => [...prev, { tool: event.tool as string, status: 'running', target: event.target as string }]);
+          setTools(prev => [...prev, {
+            id: `${String(event.tool)}:${String(event.target ?? '')}:${toolSequence.current++}`,
+            tool: event.tool as string,
+            status: 'running' as const,
+            target: event.target as string,
+          }].slice(-200));
           break;
         case 'tool_completed':
-          setTools(prev => prev.map(t => t.tool === event.tool && t.status === 'running'
-            ? { ...t, status: 'completed' as const, collected: event.collected as number, elapsed: event.elapsed_seconds as number }
-            : t
-          ));
+          setTools(prev => updateFirstRunningTool(prev, event, {
+            status: 'completed', collected: event.collected as number,
+            elapsed: event.elapsed_seconds as number,
+          }));
           // Findings were persisted before this event — trigger immediate refetch
           queryClient.invalidateQueries({ queryKey: ['scanFindings', scanId] });
           break;
         case 'tool_error':
-          setTools(prev => prev.map(t => t.tool === event.tool && t.status === 'running'
-            ? { ...t, status: 'error' as const, error: event.error as string }
-            : t
-          ));
+          setTools(prev => updateFirstRunningTool(prev, event, {
+            status: 'error', error: event.error as string,
+          }));
           break;
         case 'tool_timeout':
-          setTools(prev => prev.map(t => t.tool === event.tool && t.status === 'running'
-            ? { ...t, status: 'timeout' as const, elapsed: event.elapsed_seconds as number }
-            : t
-          ));
+          setTools(prev => updateFirstRunningTool(prev, event, {
+            status: 'timeout', elapsed: event.elapsed_seconds as number,
+          }));
           break;
         case 'scan_completed':
           setOverallStatus('completed');
@@ -284,20 +276,16 @@ function PipelineView({ scanId, targetDomain, targetType = 'domain', onComplete 
           });
           break;
       }
-    });
+      });
+    }, 50);
 
-    return () => { wsRef.current?.close(); };
-  }, [scanId, onComplete, targetDomain, addNotification]);
+    return () => {
+      window.clearTimeout(connectTimer);
+      wsRef.current?.close();
+    };
+  }, [scanId, onComplete, targetDomain, addNotification, queryClient]);
 
-  const toolStatusIcon = (status: string) => {
-    switch (status) {
-      case 'running': return <Loader2 size={13} className="spin" />;
-      case 'completed': return <CheckCircle2 size={13} style={{ color: '#10b981' }} />;
-      case 'error': return <XCircle size={13} style={{ color: '#ef4444' }} />;
-      case 'timeout': return <Clock size={13} style={{ color: '#f59e0b' }} />;
-      default: return null;
-    }
-  };
+  const activePhaseCount = Math.max(declaredPhases.length, phases.length, 1);
 
   return (
     <motion.div
@@ -321,7 +309,7 @@ function PipelineView({ scanId, targetDomain, targetType = 'domain', onComplete 
           <motion.div
             className="pipeline-progress-bar-fill"
             initial={{ width: 0 }}
-            animate={{ width: `${(phases.filter(p => p.status === 'completed').length / PHASE_ORDER.length) * 100}%` }}
+            animate={{ width: `${(phases.filter(p => p.status === 'completed').length / activePhaseCount) * 100}%` }}
             transition={{ duration: 0.4 }}
           />
         </div>
@@ -359,52 +347,34 @@ function PipelineView({ scanId, targetDomain, targetType = 'domain', onComplete 
         </button>
       </div>
 
-      <div className="pipeline-tools-stream">
-        <AnimatePresence>
-          {tools.map((tool, _idx) => {
-            const meta = TOOL_META[tool.tool] || { label: tool.tool, phase: '?', icon: Search };
-            return (
-              <motion.div
-                key={tool.tool}
-                initial={{ opacity: 0, x: -10 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0 }}
-                className={`tool-stream-item ${tool.status}`}
-              >
-                <div className="tool-stream-icon">
-                  {toolStatusIcon(tool.status)}
-                </div>
-                <div className="tool-stream-info">
-                  <span className="tool-stream-label">{meta.label}</span>
-                  {tool.target && tool.target !== targetDomain && (
-                    <span className="tool-stream-target">{tool.target}</span>
-                  )}
-                </div>
-                <div className="tool-stream-meta">
-                  {tool.elapsed !== undefined && (
-                    <span className="tool-stream-time">{tool.elapsed.toFixed(1)}s</span>
-                  )}
-                  {tool.collected !== undefined && tool.collected > 0 && (
-                    <span className="tool-stream-count">{tool.collected} found</span>
-                  )}
-                  {tool.error && (
-                    <span className="tool-stream-error">{tool.error}</span>
-                  )}
-                </div>
-              </motion.div>
-            );
-          })}
-        </AnimatePresence>
-      </div>
-
       <PipelineProgress
         tools={tools}
         phases={phases}
+        phaseOrder={declaredPhases}
         currentPhase={currentPhase}
         findingsCount={tools.reduce((sum, t) => sum + (t.collected || 0), 0)}
       />
     </motion.div>
   );
+}
+
+function updateFirstRunningTool(
+  tools: ToolEvent[],
+  event: ScanEvent,
+  changes: Partial<ToolEvent>,
+): ToolEvent[] {
+  const eventTarget = typeof event.target === 'string' ? event.target : undefined;
+  let index = tools.findIndex(tool =>
+    tool.status === 'running' && tool.tool === event.tool &&
+    (!eventTarget || tool.target === eventTarget)
+  );
+  if (index < 0) {
+    index = tools.findIndex(tool => tool.status === 'running' && tool.tool === event.tool);
+  }
+  if (index < 0) return tools;
+  const updated = [...tools];
+  updated[index] = { ...updated[index], ...changes };
+  return updated;
 }
 
 /* ─── Results view with tabs ────────────────────────────────────────── */
@@ -458,15 +428,17 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
     enabled: !!scanId,
   });
 
-  // Load findings — poll every 8s so deep-dive results appear automatically.
-  // A larger limit is used so the context has enough data for per-tab counts,
-  // while the paginated response format gives us the true total for display.
-  const FINDINGS_BATCH = 50000;
+  // Keep the interactive workspace bounded. Exports remain unbounded, while
+  // the live UI loads enough evidence for investigation without transferring
+  // tens of thousands of rows every few seconds.
+  const FINDINGS_BATCH = 5000;
   const { data: findingsResponse } = useQuery({
     queryKey: ['scanFindings', scanId],
     queryFn: async () => (await apiClient.get(`/findings/?scan_id=${scanId}&limit=${FINDINGS_BATCH}`)).data,
     enabled: !!scanId,
-    refetchInterval: 8_000,
+    refetchInterval: state.domainDeepAnalysisRunning || state.emailDeepAnalysisRunning || state.breachCheckRunning
+      ? 8_000
+      : false,
   });
 
   // Permission check
@@ -498,7 +470,8 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
   const wsRef = useRef<WebSocket | null>(null);
   useEffect(() => {
     if (!scanId) return;
-    wsRef.current = openScanWebSocket(scanId, (event: ScanEvent) => {
+    const connectTimer = window.setTimeout(() => {
+      wsRef.current = openScanWebSocket(scanId, (event: ScanEvent) => {
       switch (event.event) {
         // Email deep analysis progress
         case 'email_deep_analysis_progress':
@@ -532,17 +505,23 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
           break;
         // Deep analysis started event — currently InfrastructureTab dispatches
         // this locally; handle it in WS too so other consumers can react.
-        case 'domain_deep_analysis_started':
-          dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_STARTED', domain: event.payload?.domain || '' });
+        case 'domain_deep_analysis_started': {
+          const payload = event.payload as { domain?: string } | undefined;
+          dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_STARTED', domain: payload?.domain || '' });
           break;
+        }
         // Email deep analysis error — log the collector error silently
         case 'email_deep_analysis_error':
           break;
       }
-    });
+      });
+    }, 50);
 
-    return () => { wsRef.current?.close(); };
-  }, [scanId, dispatch]);
+    return () => {
+      window.clearTimeout(connectTimer);
+      wsRef.current?.close();
+    };
+  }, [scanId, dispatch, queryClient]);
 
   const renderTab = () => {
     switch (activeTab) {

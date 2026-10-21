@@ -156,7 +156,7 @@ export function WebOsintTab() {
                       </span>
                     ) : null}
                   </div>
-                  {nd.error && <div style={{ color: '#ef4444', marginBottom: 2 }}>{String(nd.error)}</div>}
+                  {nd.error != null && <div style={{ color: '#ef4444', marginBottom: 2 }}>{String(nd.error)}</div>}
                   {Object.entries(headers).map(([k, v]) => (
                     <div key={k} style={{ color: 'var(--text-muted)', lineHeight: 1.6 }}>
                       <span style={{ color: 'var(--accent)' }}>{k}:</span> {String(v).slice(0, 200)}
@@ -195,11 +195,11 @@ export function WebOsintTab() {
                   fontSize: 10, fontFamily: 'var(--font-mono)',
                 }}>
                   <div style={{ color: 'var(--text-strong)' }}>
-                    {nd.original_url || s.entity_value}
+                    {String(nd.original_url || s.entity_value)}
                   </div>
                   <div style={{ color: 'var(--text-muted)', marginTop: 2 }}>
-                    {nd.timestamp && <span>Archived: {String(nd.timestamp)}</span>}
-                    {nd.wayback_url && (
+                    {nd.timestamp != null && <span>Archived: {String(nd.timestamp)}</span>}
+                    {nd.wayback_url != null && (
                       <a href={String(nd.wayback_url)} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)', marginLeft: 8 }}>
                         View on Wayback ↗
                       </a>
@@ -234,9 +234,9 @@ export function WebOsintTab() {
                       color: 'var(--text-strong)', flex: 1,
                       overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                     }}>
-                      {nd.original_url || u.entity_value}
+                      {String(nd.original_url || u.entity_value)}
                     </span>
-                    {nd.status_code && (
+                    {nd.status_code != null && (
                       <span style={{
                         flexShrink: 0,
                         color: Number(nd.status_code) >= 400 ? '#ef4444' : '#10b981',
@@ -244,10 +244,10 @@ export function WebOsintTab() {
                         {String(nd.status_code)}
                       </span>
                     )}
-                    {nd.wayback_url && (
+                    {nd.wayback_url != null && (
                       <a href={String(nd.wayback_url)} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)', flexShrink: 0 }}>↗</a>
                     )}
-                    {nd.mime_type && (
+                    {nd.mime_type != null && (
                       <span className="badge" style={{ fontSize: 8, flexShrink: 0 }}>
                         {String(nd.mime_type).split('/')[1] || String(nd.mime_type)}
                       </span>

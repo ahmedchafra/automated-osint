@@ -98,6 +98,14 @@ class TargetType(str, Enum):
     ORGANIZATION = "organization"
 
 
+class ScanMode(str, Enum):
+    """How directly a scan may interact with target infrastructure."""
+
+    PASSIVE = "passive"
+    VALIDATED = "validated"
+    ACTIVE = "active"
+
+
 SEVERITY_ORDER = {
     Severity.INFO: 0,
     Severity.LOW: 1,

@@ -16,6 +16,25 @@ import {
 } from 'lucide-react';
 
 type TargetType = 'domain' | 'ip' | 'organization';
+type ScanMode = 'passive' | 'validated' | 'active';
+
+const SCAN_MODES: { value: ScanMode; label: string; description: string }[] = [
+  {
+    value: 'passive',
+    label: 'Passive',
+    description: 'Third-party datasets only; no direct target validation.',
+  },
+  {
+    value: 'validated',
+    label: 'Validated',
+    description: 'Adds DNS and low-impact HTTP liveness checks.',
+  },
+  {
+    value: 'active',
+    label: 'Active',
+    description: 'Authorizes direct checks and future active modules.',
+  },
+];
 
 const TARGET_TYPES: { value: TargetType; label: string; icon: typeof Globe; placeholder: string }[] = [
   { value: 'domain', label: 'Domain', icon: Globe, placeholder: 'example.com' },
@@ -138,6 +157,7 @@ export default function NewScan() {
   const navigate = useNavigate();
   const [targetType, setTargetType] = useState<TargetType>('domain');
   const [targetValue, setTargetValue] = useState('');
+  const [scanMode, setScanMode] = useState<ScanMode>('validated');
   const [error, setError] = useState<string | null>(null);
   const [touched, setTouched] = useState(false);
   const [detectedType, setDetectedType] = useState<TargetType | null>(null);
@@ -159,7 +179,7 @@ export default function NewScan() {
   }, [targetValue, targetType, touched]);
 
   const mutation = useMutation({
-    mutationFn: async ({ type, value }: { type: TargetType; value: string }) => {
+    mutationFn: async ({ type, value, mode }: { type: TargetType; value: string; mode: ScanMode }) => {
       const endpoint = type === 'domain'
         ? '/scans/initial'
         : type === 'ip'
@@ -167,8 +187,8 @@ export default function NewScan() {
           : '/scans/organization';
 
       const payload = type === 'domain'
-        ? { target_domain: value, selected_vectors: ['INFRASTRUCTURE'] }
-        : { target_value: value, target_type: type, selected_vectors: ['INFRASTRUCTURE'] };
+        ? { target_domain: value, scan_mode: mode, selected_vectors: ['INFRASTRUCTURE'] }
+        : { target_value: value, target_type: type, scan_mode: mode, selected_vectors: ['INFRASTRUCTURE'] };
 
       const { data } = await apiClient.post(endpoint, payload);
       return data;
@@ -192,7 +212,7 @@ export default function NewScan() {
     const ve = validateTarget(targetValue, targetType);
     if (ve) return; // inline validation will show the error
 
-    mutation.mutate({ type: targetType, value: targetValue.trim() });
+    mutation.mutate({ type: targetType, value: targetValue.trim(), mode: scanMode });
   };
 
   const isLoading = mutation.isPending;
@@ -290,6 +310,29 @@ export default function NewScan() {
               <span>{validationError}</span>
             </div>
           )}
+        </div>
+
+        <div className="ns-input-row">
+          <span className="ns-input-label">Interaction Mode</span>
+          <div className="ns-type-selector" role="radiogroup" aria-label="Scan interaction mode">
+            {SCAN_MODES.map((mode) => (
+              <button
+                key={mode.value}
+                type="button"
+                role="radio"
+                aria-checked={scanMode === mode.value}
+                className={`ns-type-btn ${scanMode === mode.value ? 'ns-type-btn-active' : ''}`}
+                onClick={() => setScanMode(mode.value)}
+                disabled={isLoading}
+                title={mode.description}
+              >
+                <span>{mode.label}</span>
+              </button>
+            ))}
+          </div>
+          <div style={{ marginTop: 7, fontSize: 11, color: 'var(--text-muted)' }}>
+            {SCAN_MODES.find((mode) => mode.value === scanMode)?.description}
+          </div>
         </div>
 
         {error && !validationError && (

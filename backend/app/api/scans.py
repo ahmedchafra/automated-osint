@@ -86,6 +86,7 @@ async def create_scan(
 ):
     db_scan = Scan(
         target_domain=scan_in.target_domain,
+        scan_mode=scan_in.scan_mode.value,
         selected_vectors=scan_in.selected_vectors,
         target_usernames=scan_in.target_usernames,
         status="QUEUED",
@@ -155,6 +156,7 @@ async def create_initial_scan(
     """
     db_scan = Scan(
         target_domain=scan_in.target_domain,
+        scan_mode=scan_in.scan_mode.value,
         selected_vectors=["INFRASTRUCTURE"],
         target_usernames=[],
         status="QUEUED",
@@ -210,6 +212,7 @@ async def create_ip_scan(
     db_scan = Scan(
         target_domain=scan_in.target_value,
         target_type="ip",
+        scan_mode=scan_in.scan_mode.value,
         selected_vectors=scan_in.selected_vectors or ["INFRASTRUCTURE"],
         target_usernames=scan_in.target_usernames or [],
         status="QUEUED",
@@ -256,6 +259,7 @@ async def create_org_scan(
     db_scan = Scan(
         target_domain=scan_in.target_value,
         target_type="organization",
+        scan_mode=scan_in.scan_mode.value,
         selected_vectors=scan_in.selected_vectors or ["INFRASTRUCTURE"],
         target_usernames=scan_in.target_usernames or [],
         status="QUEUED",

@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.schemas.enums import (
     EntityType,
     LinkType,
+    ScanMode,
     ScanStatus,
     Severity,
     TargetType,
@@ -83,6 +84,10 @@ class ScanCreateSimple(BaseModel):
         max_length=_MAX_DOMAIN_LENGTH,
         description="Apex domain to reconnoitre (e.g. example.com)",
     )
+    scan_mode: ScanMode = Field(
+        default=ScanMode.VALIDATED,
+        description="Interaction profile: passive, validated, or active",
+    )
 
     @field_validator("target_domain")
     @classmethod
@@ -107,6 +112,7 @@ class ScanCreate(BaseModel):
         max_length=_USERNAME_COUNT_CAP,
         description="Optional list of usernames for the USERNAME vector",
     )
+    scan_mode: ScanMode = Field(default=ScanMode.VALIDATED)
 
     @field_validator("target_domain")
     @classmethod
@@ -171,6 +177,7 @@ class ScanCreateV2(BaseModel):
         max_length=_USERNAME_COUNT_CAP,
         description="Optional list of usernames for the USERNAME vector",
     )
+    scan_mode: ScanMode = Field(default=ScanMode.VALIDATED)
 
     @model_validator(mode="after")
     def _validate_target(self) -> "ScanCreateV2":
@@ -214,6 +221,7 @@ class ScanResponse(SchemaBase):
     id: str
     target_domain: str
     target_type: str = "domain"
+    scan_mode: ScanMode = ScanMode.VALIDATED
     status: ScanStatus
     celery_task_id: Optional[str] = None
     selected_vectors: List[VectorType]

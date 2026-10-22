@@ -45,7 +45,6 @@ class CrtshCollector(BaseCollector):
                 d = d.strip().lower()
                 if d.endswith(target) and not d.startswith("*"):
                     subdomains.add(d)
-                    seen_subdomains.add(d)
 
             # Emit a TLS_CERT entry with full cert metadata
             results.append({
@@ -67,8 +66,9 @@ class CrtshCollector(BaseCollector):
 
             # Emit one SUBDOMAIN per unique subdomain from this cert
             for sub in subdomains:
-                if sub not in seen_subdomains:
-                    seen_subdomains.add(sub)
+                if sub in seen_subdomains:
+                    continue
+                seen_subdomains.add(sub)
                 results.append({
                     "type": "SUBDOMAIN",
                     "value": sub,

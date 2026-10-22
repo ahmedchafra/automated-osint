@@ -219,6 +219,56 @@ def test_new_collectors_are_registered():
     assert expected.issubset(registry.get_all_collectors().keys())
 
 
+def test_crtsh_deduplicates_subdomains_across_certificates(monkeypatch):
+    import asyncio
+
+    from collectors.infrastructure.crtsh import CrtshCollector
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [
+                {
+                    "serial_number": "1",
+                    "name_value": "www.example.com\napi.example.com",
+                },
+                {
+                    "serial_number": "2",
+                    "name_value": "www.example.com\nmail.example.com",
+                },
+            ]
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "collectors.infrastructure.crtsh.httpx.AsyncClient", FakeClient
+    )
+    results = asyncio.run(CrtshCollector().collect("example.com"))
+
+    subdomains = [
+        result["value"] for result in results if result["type"] == "SUBDOMAIN"
+    ]
+    assert sorted(subdomains) == [
+        "api.example.com",
+        "mail.example.com",
+        "www.example.com",
+    ]
+    assert len([result for result in results if result["type"] == "TLS_CERT"]) == 2
+
+
 def test_scan_websocket_stream(monkeypatch, client):
     class FakeStreamer:
         async def stream(self, websocket, scan_id):

@@ -1,5 +1,6 @@
 from celery import Celery
 from app.config import settings
+from app.workers.tracked_task import TrackedTask
 
 celery_app = Celery(
     "osint_worker",
@@ -7,6 +8,7 @@ celery_app = Celery(
     backend=settings.REDIS_URL,
     include=["app.workers.scan_tasks"],
 )
+celery_app.Task = TrackedTask
 
 celery_app.conf.update(
     task_serializer="json",

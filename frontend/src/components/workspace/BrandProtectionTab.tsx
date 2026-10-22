@@ -14,6 +14,11 @@ export function BrandProtectionTab() {
     }
   }, [state.activeEnrichmentDomain, selectedDomain]);
   const [scanRunning, setScanRunning] = useState(false);
+  const persistedScanRunning = state.jobs.some(job =>
+    job.job_type === 'dnstwist_only'
+    && ['QUEUED', 'RUNNING', 'RETRYING'].includes(job.status)
+  );
+  const isScanRunning = scanRunning || persistedScanRunning;
   const [expandedLookalike, setExpandedLookalike] = useState<string | null>(null);
   const scanLookalikeCountRef = useRef(0);
   const scanTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -117,21 +122,21 @@ export function BrandProtectionTab() {
           </select>
           <button
             className="ws-enrich-btn-primary"
-            disabled={!selectedDomain || scanRunning}
+            disabled={!selectedDomain || isScanRunning}
             onClick={handleRunDnstwist}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 5,
               padding: '5px 14px', borderRadius: 6, fontSize: 11, fontWeight: 500, border: 'none',
-              cursor: (!selectedDomain || scanRunning) ? 'not-allowed' : 'pointer',
-              opacity: (!selectedDomain || scanRunning) ? 0.5 : 1,
+              cursor: (!selectedDomain || isScanRunning) ? 'not-allowed' : 'pointer',
+              opacity: (!selectedDomain || isScanRunning) ? 0.5 : 1,
               background: 'var(--accent)', color: '#fff',
             }}
           >
-            {scanRunning ? <Loader2 size={11} className="animate-spin" /> : <ShieldCheck size={11} />}
-            {scanRunning ? 'Scanning...' : 'Run dnstwist'}
+            {isScanRunning ? <Loader2 size={11} className="animate-spin" /> : <ShieldCheck size={11} />}
+            {isScanRunning ? 'Scanning...' : 'Run dnstwist'}
           </button>
         </div>
-        {scanRunning && (
+        {isScanRunning && (
           <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>
             Generating lookalike permutations for {selectedDomain}...
           </div>

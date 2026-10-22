@@ -220,7 +220,8 @@ async def check_scan_access(
             If False, "read"-level access suffices.
 
     Returns:
-        The Scan object (with ``.findings`` and ``.collaborators`` loaded).
+        The authorized Scan object. Findings are intentionally not loaded;
+        callers must use the paginated findings API.
 
     Raises:
         404 if the scan doesn't exist or the user has no access.
@@ -228,11 +229,7 @@ async def check_scan_access(
     """
     # Admins can access any scan
     if current_user.role == "admin":
-        stmt = (
-            select(Scan)
-            .options(selectinload(Scan.findings))
-            .where(Scan.id == scan_id)
-        )
+        stmt = select(Scan).where(Scan.id == scan_id)
         result = await db.execute(stmt)
         scan = result.scalar_one_or_none()
         if not scan:
@@ -242,7 +239,7 @@ async def check_scan_access(
     # Non-admin: check ownership or collaborator permission
     stmt = (
         select(Scan)
-        .options(selectinload(Scan.collaborators), selectinload(Scan.findings))
+        .options(selectinload(Scan.collaborators))
         .where(Scan.id == scan_id)
     )
     result = await db.execute(stmt)

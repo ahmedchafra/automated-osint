@@ -35,6 +35,16 @@ export function IdentityTab() {
   // expandedEmail: which email row is showing breach/platform details below
   const [expandedEmail, setExpandedEmail] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  const activeBreachJob = state.jobs.find(job =>
+    job.job_type === 'email_breach_check'
+    && ['QUEUED', 'RUNNING', 'RETRYING'].includes(job.status)
+  );
+  const activeEmailJob = state.jobs.find(job =>
+    job.job_type === 'email_deep_analysis'
+    && ['QUEUED', 'RUNNING', 'RETRYING'].includes(job.status)
+  );
+  const effectiveBreachRunning = breachCheckRunning || state.breachCheckRunning || Boolean(activeBreachJob);
+  const effectiveDeepDiveRunning = deepDiveRunning || state.emailDeepAnalysisRunning || Boolean(activeEmailJob);
 
   const emails = state.findings.filter(f => f.entity_type === 'EMAIL');
   const breaches = state.findings.filter(f => {
@@ -222,7 +232,7 @@ export function IdentityTab() {
   }, [state.scan?.id]);
 
   const handleCheckBreaches = useCallback(async () => {
-    if (selectedEmails.size === 0 || !state.scan?.id) return;
+    if (selectedEmails.size === 0 || !state.scan?.id || effectiveBreachRunning) return;
     breachBaselineRef.current = state.findings.length;
     setBreachCheckRunning(true);
     dispatch({ type: 'BREACH_CHECK_STARTED', emails: Array.from(selectedEmails) });
@@ -237,10 +247,10 @@ export function IdentityTab() {
       setBreachCheckRunning(false);
     }
     // DO NOT clear breachCheckRunning here — WS or findings-polling useEffect handles it
-  }, [selectedEmails, state.scan?.id, state.findings.length, dispatch]);
+  }, [selectedEmails, state.scan?.id, state.findings.length, dispatch, effectiveBreachRunning]);
 
   const handleDeepDive = async (email: string) => {
-    if (!state.scan?.id) return;
+    if (!state.scan?.id || effectiveDeepDiveRunning) return;
     deepDiveBaselineRef.current = state.findings.length;
     setDeepDiveEmail(email);
     setDeepDiveRunning(true);
@@ -371,7 +381,7 @@ export function IdentityTab() {
   return (
     <div className="ws-identity">
       {/* Loading banner for running tasks */}
-      {(breachCheckRunning || deepDiveRunning || state.emailDeepAnalysisRunning || state.breachCheckRunning) && (
+      {(effectiveBreachRunning || effectiveDeepDiveRunning) && (
         <motion.div
           initial={{ opacity: 0, height: 0 }}
           animate={{ opacity: 1, height: 'auto' }}
@@ -387,7 +397,7 @@ export function IdentityTab() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <Loader2 size={14} className="animate-spin" />
             <span>
-              {(breachCheckRunning || state.breachCheckRunning)
+              {effectiveBreachRunning
                 ? `Checking breaches for ${selectedEmails.size} email${selectedEmails.size > 1 ? 's' : ''}…`
                 : deepDiveRunning
                   ? `Deep-diving ${deepDiveEmail}…`
@@ -453,7 +463,7 @@ export function IdentityTab() {
 
                 return (
                   <DeepAnalysisProgress
-                    running={deepDiveRunning || state.emailDeepAnalysisRunning}
+                    running={effectiveDeepDiveRunning}
                     items={items}
                     title={`Deep Dive: ${currentEmail.email}`}
                   />
@@ -509,17 +519,17 @@ export function IdentityTab() {
           <button
             className="ws-enrich-btn-primary"
             onClick={handleCheckBreaches}
-            disabled={selectedEmails.size === 0 || breachCheckRunning}
+            disabled={selectedEmails.size === 0 || effectiveBreachRunning}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 4,
               padding: '4px 12px', borderRadius: 6, fontSize: 11,
               fontWeight: 500, border: 'none',
-              cursor: (selectedEmails.size === 0 || breachCheckRunning) ? 'not-allowed' : 'pointer',
-              opacity: (selectedEmails.size === 0 || breachCheckRunning) ? 0.5 : 1,
+              cursor: (selectedEmails.size === 0 || effectiveBreachRunning) ? 'not-allowed' : 'pointer',
+              opacity: (selectedEmails.size === 0 || effectiveBreachRunning) ? 0.5 : 1,
               background: 'var(--accent)', color: '#fff',
             }}
           >
-            {breachCheckRunning ? <Loader2 size={11} className="animate-spin" /> : <Shield size={11} />}
+            {effectiveBreachRunning ? <Loader2 size={11} className="animate-spin" /> : <Shield size={11} />}
             Check Breaches on Selected
           </button>
           {state.scan?.id && (
@@ -567,7 +577,9 @@ export function IdentityTab() {
             const username = emailStr.split('@')[0];
             const profileCount = profileCounts[username] || 0;
             const isSelected = selectedEmails.has(emailStr);
-            const isDeepDiving = deepDiveEmail === emailStr && deepDiveRunning;
+            const ledgerTargetsEmail = activeEmailJob?.input_value?.includes(emailStr) ?? false;
+            const isDeepDiving = effectiveDeepDiveRunning
+              && (deepDiveEmail === emailStr || ledgerTargetsEmail);
             const isExpanded = expandedEmail === emailStr;
             const hasDetails = breachCount > 0 || platformCount > 0 || profileCount > 0;
             return (

@@ -19,6 +19,16 @@ export function InfrastructureTab() {
   const [showHarvesterPicker, setShowHarvesterPicker] = useState<string | null>(null);
   const [harvesterMode, setHarvesterMode] = useState<'quick' | 'full' | 'auto'>('auto');
   const [showRawWhois, setShowRawWhois] = useState(false);
+  const activeJobs = state.jobs.filter(job => ['QUEUED', 'RUNNING', 'RETRYING'].includes(job.status));
+  const ledgerEnrichingIps = activeJobs
+    .filter(job => job.job_type === 'shodan_enrich' || job.job_type === 'censys_enrich')
+    .map(job => job.input_value)
+    .filter((value): value is string => Boolean(value));
+  const effectiveEnrichingIps = new Set([...enrichingIps, ...ledgerEnrichingIps]);
+  const domainAnalysisRunning = state.domainDeepAnalysisRunning
+    || activeJobs.some(job => job.job_type === 'domain_deep_analysis');
+  const emailAnalysisRunning = state.emailDeepAnalysisRunning
+    || activeJobs.some(job => job.job_type === 'email_deep_analysis');
 
   const mainDomain = state.scan?.target_domain || '';
   const subdomains = useMemo(() => {
@@ -129,7 +139,7 @@ export function InfrastructureTab() {
   };
 
   const handleEnrich = async (ip: string, provider: string = 'shodan') => {
-    if (!state.scan?.id || enrichingIps.has(ip)) return;
+    if (!state.scan?.id || effectiveEnrichingIps.has(ip)) return;
     setEnrichingIps(prev => new Set(prev).add(ip));
     try {
       await apiClient.post(`/scans/${state.scan.id}/shodan-enrich`, { ip, provider });
@@ -370,10 +380,10 @@ export function InfrastructureTab() {
                 expanded={expanded['__main_domain__']}
                 onToggle={() => setExpanded(prev => ({ ...prev, ['__main_domain__']: !prev['__main_domain__'] }))}
                 onDeepAnalysis={() => handleDeepAnalysis(mainDomain)}
-                isDeepAnalyzing={state.domainDeepAnalysisRunning}
+                isDeepAnalyzing={domainAnalysisRunning}
                 hasDeepResults={state.domainDeepAnalysisDomain === mainDomain}
                 onEnrich={handleEnrich}
-                enrichingIps={enrichingIps}
+                enrichingIps={effectiveEnrichingIps}
                 isMainDomain
               />
             )}
@@ -381,7 +391,7 @@ export function InfrastructureTab() {
               const ips = getIpsForSubdomain(sub.entity_value);
               const isExpanded = expanded[sub.entity_value];
               const subCves = ips.flatMap(ip => getCvesForIp(ip));
-              const isDeepAnalyzing = state.domainDeepAnalysisRunning;
+              const isDeepAnalyzing = domainAnalysisRunning;
               const hasDeepResults = state.domainDeepAnalysisDomain === sub.entity_value;
               const dnsRecordsForSub = getDnsRecordsForSubdomain(sub.entity_value);
               const subHostMeta = hostMeta.filter(h => ips.includes(h.entity_value));
@@ -415,7 +425,7 @@ export function InfrastructureTab() {
                   isDeepAnalyzing={isDeepAnalyzing}
                   hasDeepResults={hasDeepResults}
                   onEnrich={handleEnrich}
-                  enrichingIps={enrichingIps}
+                  enrichingIps={effectiveEnrichingIps}
                 />
               );
             })}
@@ -601,9 +611,9 @@ export function InfrastructureTab() {
           breaches={breaches}
           emailPlatforms={emailPlatforms}
           profiles={profiles}
-          domainAnalysisRunning={state.domainDeepAnalysisRunning}
+          domainAnalysisRunning={domainAnalysisRunning}
           domainAnalysisProgress={state.domainDeepAnalysisProgress}
-          emailAnalysisRunning={state.emailDeepAnalysisRunning}
+          emailAnalysisRunning={emailAnalysisRunning}
           emailAnalysisProgress={state.emailDeepAnalysisProgress}
           onToggleEmail={toggleEmail}
           onSelectAll={() => setSelectedEmails(new Set(filteredEmails.map(e => e.entity_value)))}

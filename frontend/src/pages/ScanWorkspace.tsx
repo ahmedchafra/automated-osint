@@ -14,7 +14,7 @@ import { useScanWorkspace } from '../context/ScanWorkspaceContext';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import type { ScanEvent } from '../api/ws';
-import type { TabId, ScanWorkspaceState, ScanWorkspaceAction } from '../context/ScanWorkspaceContext';
+import type { ScanJob, TabId, ScanWorkspaceState, ScanWorkspaceAction } from '../context/ScanWorkspaceContext';
 import ErrorBoundary from '../components/ErrorBoundary';
 import { InfrastructureTab } from '../components/workspace/InfrastructureTab';
 import { IdentityTab } from '../components/workspace/IdentityTab';
@@ -53,6 +53,79 @@ interface ScanResult {
 }
 
 type AppView = 'loading' | 'input' | 'pipeline' | 'results';
+
+const ACTIVE_JOB_STATUSES = new Set(['QUEUED', 'RUNNING', 'RETRYING']);
+const TERMINAL_JOB_STATUSES = new Set(['COMPLETED', 'FAILED', 'CANCELLED']);
+
+const JOB_LABELS: Record<string, string> = {
+  execute_scan: 'Full scan',
+  execute_initial_scan: 'Domain discovery',
+  execute_ip_scan: 'IP discovery',
+  execute_org_scan: 'Organization discovery',
+  execute_org_infra: 'Organization enrichment',
+  domain_deep_analysis: 'Domain deep analysis',
+  email_deep_analysis: 'Email deep analysis',
+  email_breach_check: 'Breach check',
+  github_secrets_scan: 'GitHub secrets',
+  shodan_enrich: 'Shodan enrichment',
+  censys_enrich: 'Censys enrichment',
+  dnstwist_only: 'Lookalike domains',
+  ahmia_search: 'Dark-web search',
+  telegram_monitor: 'Telegram monitor',
+  run_ai_dork_task: 'AI search',
+};
+
+function JobActivityPanel({ jobs }: { jobs: ScanJob[] }) {
+  if (jobs.length === 0) return null;
+  const activeCount = jobs.filter(job => ACTIVE_JOB_STATUSES.has(job.status)).length;
+  const visibleJobs = jobs.slice(0, 8);
+
+  return (
+    <div style={{
+      margin: '0 0 16px', borderRadius: 'var(--radius-lg)',
+      background: 'var(--bg-secondary)', border: '1px solid var(--border)', overflow: 'hidden',
+    }}>
+      <div style={{
+        padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 8,
+        borderBottom: '1px solid var(--border)', fontSize: 12, fontWeight: 600,
+      }}>
+        {activeCount > 0 ? <Loader2 size={14} className="spin" style={{ color: 'var(--accent)' }} /> : <Activity size={14} />}
+        <span>Background jobs</span>
+        <span style={{ marginLeft: 'auto', color: activeCount > 0 ? 'var(--accent)' : 'var(--text-muted)', fontSize: 11 }}>
+          {activeCount > 0 ? `${activeCount} active` : 'idle'}
+        </span>
+      </div>
+      {visibleJobs.map(job => {
+        const active = ACTIVE_JOB_STATUSES.has(job.status);
+        const failed = job.status === 'FAILED';
+        return (
+          <div key={job.id} style={{
+            padding: '7px 14px', display: 'flex', alignItems: 'center', gap: 8,
+            borderBottom: '1px solid var(--border)', fontSize: 11,
+          }}>
+            {active ? <Loader2 size={12} className="spin" style={{ color: 'var(--accent)' }} />
+              : failed ? <XCircle size={12} style={{ color: '#ef4444' }} />
+                : <CheckCircle2 size={12} style={{ color: job.status === 'CANCELLED' ? '#f59e0b' : '#10b981' }} />}
+            <span style={{ color: 'var(--text-strong)', fontWeight: 500 }}>
+              {JOB_LABELS[job.job_type] || job.job_type}
+            </span>
+            {job.input_value && (
+              <span style={{
+                color: 'var(--text-muted)', fontFamily: 'var(--font-mono)',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 280,
+              }}>
+                {job.input_value}
+              </span>
+            )}
+            <span style={{ marginLeft: 'auto', color: failed ? '#ef4444' : 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+              {job.status.toLowerCase()}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 /* ─── Tool metadata ─────────────────────────────────────────────────── */
 
@@ -210,6 +283,42 @@ function PipelineView({ scanId, targetDomain, targetType = 'domain', onComplete 
   const queryClient = useQueryClient();
   const wsRef = useRef<WebSocket | null>(null);
   const toolSequence = useRef(0);
+  const completionHandled = useRef(false);
+  const terminalFailureHandled = useRef(false);
+
+  const { data: persistedScan } = useQuery({
+    queryKey: ['scanWorkspace', scanId],
+    queryFn: async () => (await apiClient.get(`/scans/${scanId}`)).data,
+    refetchInterval: 2_000,
+  });
+  const { data: pipelineJobs = [] } = useQuery<ScanJob[]>({
+    queryKey: ['scanJobs', scanId],
+    queryFn: async () => (await apiClient.get(`/scans/${scanId}/jobs`)).data,
+    refetchInterval: 2_000,
+  });
+
+  useEffect(() => {
+    if (!persistedScan || completionHandled.current) return;
+    if (persistedScan.status === 'COMPLETED') {
+      completionHandled.current = true;
+      onComplete({
+        scan_id: scanId,
+        status: 'COMPLETED',
+        total_findings: persistedScan.findings_count || 0,
+        links_created: persistedScan.links_count || 0,
+      });
+    } else if (
+      ['FAILED', 'CANCELLED'].includes(persistedScan.status)
+      && !terminalFailureHandled.current
+    ) {
+      terminalFailureHandled.current = true;
+      addNotification({
+        type: 'error',
+        title: persistedScan.status === 'CANCELLED' ? 'Scan Cancelled' : 'Scan Failed',
+        message: targetDomain,
+      });
+    }
+  }, [persistedScan, scanId, targetDomain, onComplete, addNotification]);
 
   useEffect(() => {
     const connectTimer = window.setTimeout(() => {
@@ -259,6 +368,7 @@ function PipelineView({ scanId, targetDomain, targetType = 'domain', onComplete 
           }));
           break;
         case 'scan_completed':
+          completionHandled.current = true;
           setOverallStatus('completed');
           addNotification({
             type: 'success',
@@ -268,6 +378,7 @@ function PipelineView({ scanId, targetDomain, targetType = 'domain', onComplete 
           onComplete({ scan_id: scanId, status: 'COMPLETED', total_findings: event.total_findings as number, links_created: event.links_created as number, phases: event.phases as Record<string, unknown> });
           break;
         case 'scan_failed':
+          terminalFailureHandled.current = true;
           setOverallStatus('error');
           addNotification({
             type: 'error',
@@ -286,6 +397,11 @@ function PipelineView({ scanId, targetDomain, targetType = 'domain', onComplete 
   }, [scanId, onComplete, targetDomain, addNotification, queryClient]);
 
   const activePhaseCount = Math.max(declaredPhases.length, phases.length, 1);
+  const displayedStatus = persistedScan?.status === 'COMPLETED'
+    ? 'completed'
+    : ['FAILED', 'CANCELLED'].includes(persistedScan?.status)
+      ? 'error'
+      : overallStatus;
 
   return (
     <motion.div
@@ -299,10 +415,10 @@ function PipelineView({ scanId, targetDomain, targetType = 'domain', onComplete 
           {(() => { const Icon = TARGET_TYPE_ICONS[targetType] || Globe; return <Icon size={16} />; })()}
           <span className="pipeline-target-domain">{targetDomain}</span>
           <span className="pipeline-type-badge">{TARGET_TYPE_LABELS[targetType] || targetType}</span>
-          <span className={`pipeline-status-badge ${overallStatus}`}>
-            {overallStatus === 'running' && <><Loader2 size={11} className="spin" /> RUNNING</>}
-            {overallStatus === 'completed' && <><CheckCircle2 size={11} /> COMPLETED</>}
-            {overallStatus === 'error' && <><XCircle size={11} /> FAILED</>}
+          <span className={`pipeline-status-badge ${displayedStatus}`}>
+            {displayedStatus === 'running' && <><Loader2 size={11} className="spin" /> RUNNING</>}
+            {displayedStatus === 'completed' && <><CheckCircle2 size={11} /> COMPLETED</>}
+            {displayedStatus === 'error' && <><XCircle size={11} /> FAILED</>}
           </span>
         </div>
         <div className="pipeline-progress-bar-container">
@@ -354,6 +470,7 @@ function PipelineView({ scanId, targetDomain, targetType = 'domain', onComplete 
         currentPhase={currentPhase}
         findingsCount={tools.reduce((sum, t) => sum + (t.collected || 0), 0)}
       />
+      <JobActivityPanel jobs={pipelineJobs} />
     </motion.div>
   );
 }
@@ -436,9 +553,20 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
     queryKey: ['scanFindings', scanId],
     queryFn: async () => (await apiClient.get(`/findings/?scan_id=${scanId}&limit=${FINDINGS_BATCH}`)).data,
     enabled: !!scanId,
-    refetchInterval: state.domainDeepAnalysisRunning || state.emailDeepAnalysisRunning || state.breachCheckRunning
+    refetchInterval: state.jobs.some(job => ACTIVE_JOB_STATUSES.has(job.status))
+      || state.domainDeepAnalysisRunning || state.emailDeepAnalysisRunning || state.breachCheckRunning
       ? 8_000
       : false,
+  });
+
+  const { data: jobs = [] } = useQuery<ScanJob[]>({
+    queryKey: ['scanJobs', scanId],
+    queryFn: async () => (await apiClient.get(`/scans/${scanId}/jobs`)).data,
+    enabled: !!scanId,
+    refetchInterval: (query) => {
+      const currentJobs = query.state.data ?? [];
+      return currentJobs.some(job => ACTIVE_JOB_STATUSES.has(job.status)) ? 1_500 : 10_000;
+    },
   });
 
   // Permission check
@@ -465,6 +593,25 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
       dispatch({ type: 'FINDINGS_UPDATED', findings: findingsResponse.items ?? [] });
     }
   }, [findingsResponse, dispatch]);
+
+  const seenTerminalJobs = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    dispatch({ type: 'JOBS_UPDATED', jobs });
+    const terminalIds = new Set(
+      jobs.filter(job => TERMINAL_JOB_STATUSES.has(job.status)).map(job => job.id),
+    );
+    if (seenTerminalJobs.current === null) {
+      seenTerminalJobs.current = terminalIds;
+      return;
+    }
+
+    const hasNewTerminalJob = [...terminalIds].some(id => !seenTerminalJobs.current?.has(id));
+    seenTerminalJobs.current = terminalIds;
+    if (hasNewTerminalJob) {
+      queryClient.invalidateQueries({ queryKey: ['scanFindings', scanId] });
+      queryClient.invalidateQueries({ queryKey: ['scanWorkspace', scanId] });
+    }
+  }, [jobs, scanId, dispatch, queryClient]);
 
   // WebSocket for live progress events (deep analysis, breach checks, etc.)
   const wsRef = useRef<WebSocket | null>(null);
@@ -501,13 +648,17 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
         // Scan health — refresh scan status so the tab knows it finished
         case 'scan_completed':
         case 'scan_failed':
-          queryClient.invalidateQueries({ queryKey: ['scan', scanId] });
+          queryClient.invalidateQueries({ queryKey: ['scanWorkspace', scanId] });
+          queryClient.invalidateQueries({ queryKey: ['scanJobs', scanId] });
           break;
         // Deep analysis started event — currently InfrastructureTab dispatches
         // this locally; handle it in WS too so other consumers can react.
         case 'domain_deep_analysis_started': {
           const payload = event.payload as { domain?: string } | undefined;
-          dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_STARTED', domain: payload?.domain || '' });
+          dispatch({
+            type: 'DOMAIN_DEEP_ANALYSIS_STARTED',
+            domain: String(event.domain || payload?.domain || ''),
+          });
           break;
         }
         // Email deep analysis error — log the collector error silently
@@ -588,6 +739,8 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
           <span>You have read-only access to this scan. Action buttons are hidden.</span>
         </motion.div>
       )}
+
+      <JobActivityPanel jobs={jobs} />
 
       {/* Tab navigation */}
       <div className="ws-tabs">
@@ -728,6 +881,7 @@ function DiscoveredDomainsCard({
   const [infraRunning, setInfraRunning] = useState<string | null>(null);
   const [infraError, setInfraError] = useState<string | null>(null);
   const { addNotification } = useNotification();
+  const queryClient = useQueryClient();
 
   // Extract DOMAIN_METADATA findings (discovered org domains),
   // score them, sort by score descending.
@@ -741,7 +895,14 @@ function DiscoveredDomainsCard({
   }, [state.findings]);
 
   // Also look for the active enrichment domain from context
-  const { activeEnrichmentDomain } = state;
+  const persistedDomain = discoveredDomains.some(f => f.entity_value === state.scan?.target_domain)
+    ? state.scan?.target_domain
+    : null;
+  const activeEnrichmentDomain = state.activeEnrichmentDomain || persistedDomain;
+  const activeInfraJob = state.jobs.find(
+    job => job.job_type === 'execute_org_infra' && ACTIVE_JOB_STATUSES.has(job.status),
+  );
+  const runningDomain = activeInfraJob?.input_value || infraRunning;
 
   if (discoveredDomains.length === 0) return null;
 
@@ -754,8 +915,8 @@ function DiscoveredDomainsCard({
       if (addNotification) {
         addNotification({
           type: 'success',
-          title: 'Infrastructure scan started',
-          message: `Running full pipeline on ${domain}`,
+          title: 'Full pipeline started',
+          message: `Running infrastructure, services, identity, and search on ${domain}`,
         });
       }
     } catch (err: any) {
@@ -763,6 +924,20 @@ function DiscoveredDomainsCard({
       setInfraError(detail);
     } finally {
       setInfraRunning(null);
+    }
+  };
+
+  const handleSetTarget = async (domain: string) => {
+    if (!scanId) return;
+    setInfraError(null);
+    try {
+      await apiClient.patch(`/scans/${scanId}/primary-domain`, { domain });
+      dispatch({ type: 'SET_ENRICHMENT_DOMAIN', domain });
+      await queryClient.invalidateQueries({ queryKey: ['scanWorkspace', scanId] });
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })
+        ?.response?.data?.detail || 'Failed to save the primary domain.';
+      setInfraError(detail);
     }
   };
 
@@ -877,12 +1052,8 @@ function DiscoveredDomainsCard({
                     padding: '3px 10px', fontSize: 10,
                     opacity: isActive ? 0.6 : 1,
                   }}
-                  onClick={() =>
-                    dispatch({
-                      type: 'SET_ENRICHMENT_DOMAIN',
-                      domain: isActive ? null : f.entity_value,
-                    })
-                  }
+                  onClick={() => handleSetTarget(f.entity_value)}
+                  disabled={isActive}
                 >
                   {isActive ? 'Active' : 'Target'}
                 </button>
@@ -893,18 +1064,18 @@ function DiscoveredDomainsCard({
                   style={{
                     padding: '3px 10px', fontSize: 10,
                     display: 'inline-flex', alignItems: 'center', gap: 4,
-                    opacity: infraRunning === f.entity_value ? 0.7 : 1,
+                    opacity: runningDomain === f.entity_value ? 0.7 : 1,
                   }}
                   onClick={() => handleRunInfra(f.entity_value)}
-                  disabled={infraRunning !== null}
+                  disabled={runningDomain !== null}
                 >
-                  {infraRunning === f.entity_value ? (
+                  {runningDomain === f.entity_value ? (
                     <>
                       <Loader2 size={10} className="spin" />
                       <span>Running...</span>
                     </>
                   ) : (
-                    <span>Run Infra</span>
+                    <span>Run Full Pipeline</span>
                   )}
                 </button>
               </div>

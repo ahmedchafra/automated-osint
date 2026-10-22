@@ -27,9 +27,26 @@ export interface EmailDeepAnalysisProgress {
   error?: string;
 }
 
+export interface ScanJob {
+  id: string;
+  scan_id: string;
+  celery_task_id: string;
+  job_type: string;
+  stage: string;
+  status: 'QUEUED' | 'RUNNING' | 'RETRYING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+  input_type?: string | null;
+  input_value?: string | null;
+  error?: string | null;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  updated_at: string;
+}
+
 export interface ScanWorkspaceState {
   scan: any | null;
   findings: FindingRow[];
+  jobs: ScanJob[];
   wsConnected: boolean;
   activeTab: TabId;
   eventLog: LogEvent[];
@@ -63,6 +80,7 @@ export type ScanWorkspaceAction =
   | { type: 'SCAN_LOADED'; scan: any; payload?: any }
   | { type: 'SET_TOTAL_VECTORS'; total: number }
   | { type: 'FINDINGS_UPDATED'; findings: FindingRow[]; payload?: any }
+  | { type: 'JOBS_UPDATED'; jobs: ScanJob[] }
   | { type: 'FINDING_PUSHED'; finding: FindingRow; payload?: any }
   | { type: 'WS_CONNECTED' }
   | { type: 'WS_DISCONNECTED' }
@@ -91,6 +109,7 @@ export type ScanWorkspaceAction =
 const INITIAL_STATE: ScanWorkspaceState = {
   scan: null,
   findings: [],
+  jobs: [],
   wsConnected: false,
   activeTab: 'infrastructure',
   eventLog: [],
@@ -120,6 +139,8 @@ function reducer(state: ScanWorkspaceState, action: ScanWorkspaceAction): ScanWo
       return { ...state, totalVectors: action.total };
     case 'FINDINGS_UPDATED':
       return { ...state, findings: action.findings };
+    case 'JOBS_UPDATED':
+      return { ...state, jobs: action.jobs };
     case 'FINDING_PUSHED':
       return { ...state, findings: [...state.findings, action.finding] };
     case 'WS_CONNECTED':

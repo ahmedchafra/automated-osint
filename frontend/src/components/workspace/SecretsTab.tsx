@@ -20,9 +20,14 @@ const SEVERITY_BADGE: Record<string, string> = {
 };
 
 export function SecretsTab() {
-  const { state, dispatch } = useScanWorkspace();
+  const { state } = useScanWorkspace();
   const [scanRunning, setScanRunning] = useState(false);
   const [scannedDomain, setScannedDomain] = useState<string | null>(null);
+  const persistedScanRunning = state.jobs.some(job =>
+    job.job_type === 'github_secrets_scan'
+    && ['QUEUED', 'RUNNING', 'RETRYING'].includes(job.status)
+  );
+  const isScanRunning = scanRunning || persistedScanRunning;
 
   const repos = state.findings.filter(f => f.entity_type === 'GITHUB_REPO');
   const secrets = state.findings.filter(f => f.entity_type === 'LEAKED_SECRET');
@@ -55,18 +60,16 @@ export function SecretsTab() {
     if (!baseDomain || !state.scan?.id) return;
     setScanRunning(true);
     setScannedDomain(baseDomain);
-    dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_STARTED', domain: baseDomain });
     try {
       await apiClient.post(`/scans/${state.scan.id}/secrets-scan`, { domain: baseDomain });
     } catch (err: any) {
       console.error('Secrets scan failed:', err);
     } finally {
       setScanRunning(false);
-      dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_COMPLETED', payload: {} });
     }
   };
 
-  if (repos.length === 0 && secrets.length === 0 && !scanRunning) {
+  if (repos.length === 0 && secrets.length === 0 && !isScanRunning) {
     return (
       <div className="ws-empty" style={{ padding: '2rem' }}>
         <ShieldCheck size={32} style={{ marginBottom: 8, opacity: 0.4 }} />
@@ -109,20 +112,20 @@ export function SecretsTab() {
           <button
             className="ws-enrich-btn-primary"
             onClick={handleScanSecrets}
-            disabled={scanRunning}
+            disabled={isScanRunning}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 6,
               padding: '5px 14px', borderRadius: 6, fontSize: 12, fontWeight: 500, border: 'none',
-              cursor: scanRunning ? 'not-allowed' : 'pointer',
-              opacity: scanRunning ? 0.5 : 1,
+              cursor: isScanRunning ? 'not-allowed' : 'pointer',
+              opacity: isScanRunning ? 0.5 : 1,
               background: 'var(--accent)', color: '#fff',
             }}
           >
-            {scanRunning ? <Loader2 size={12} className="animate-spin" /> : <Key size={12} />}
-            {scanRunning ? 'Scanning...' : 'Scan Again'}
+            {isScanRunning ? <Loader2 size={12} className="animate-spin" /> : <Key size={12} />}
+            {isScanRunning ? 'Scanning...' : 'Scan Again'}
           </button>
         </div>
-        {scanRunning && (
+        {isScanRunning && (
           <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>
             Scanning {scannedDomain} public repos for leaked secrets...
           </div>

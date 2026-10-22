@@ -4,10 +4,24 @@ import { useScanWorkspace } from '../../context/ScanWorkspaceContext';
 import apiClient from '../../api/client';
 
 export function ThreatIntelTab() {
-  const { state, dispatch } = useScanWorkspace();
+  const { state } = useScanWorkspace();
   const [selectedDomain, setSelectedDomain] = useState<string>(state.activeEnrichmentDomain || '');
   const [telegramKeyword, setTelegramKeyword] = useState<string>('');
   const [activeAction, setActiveAction] = useState<string | null>(null);
+  const persistedAction = (() => {
+    const activeJob = state.jobs.find(job =>
+      ['QUEUED', 'RUNNING', 'RETRYING'].includes(job.status)
+      && ['github_secrets_scan', 'dnstwist_only', 'telegram_monitor', 'ahmia_search'].includes(job.job_type)
+    );
+    if (!activeJob) return null;
+    return {
+      github_secrets_scan: 'secrets',
+      dnstwist_only: 'dnstwist',
+      telegram_monitor: 'telegram',
+      ahmia_search: 'ahmia',
+    }[activeJob.job_type] || null;
+  })();
+  const currentAction = activeAction || persistedAction;
 
   // Sync with active enrichment domain (org scan target picker)
   useEffect(() => {
@@ -49,35 +63,30 @@ export function ThreatIntelTab() {
   const handleRunDnstwist = async () => {
     if (!selectedDomain || !state.scan?.id) return;
     setActiveAction('dnstwist');
-    dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_STARTED', domain: selectedDomain });
     try {
       await apiClient.post(`/scans/${state.scan.id}/dnstwist`, { domain: selectedDomain });
     } catch (err: any) {
       console.error('dnstwist failed:', err);
     } finally {
       setActiveAction(null);
-      dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_COMPLETED', payload: {} });
     }
   };
 
   const handleScanSecrets = async () => {
     if (!selectedDomain || !state.scan?.id) return;
     setActiveAction('secrets');
-    dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_STARTED', domain: selectedDomain });
     try {
-      await apiClient.post(`/scans/${state.scan.id}/domain-deep-analysis`, { domain: selectedDomain });
+      await apiClient.post(`/scans/${state.scan.id}/secrets-scan`, { domain: selectedDomain });
     } catch (err: any) {
       console.error('Secrets scan failed:', err);
     } finally {
       setActiveAction(null);
-      dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_COMPLETED', payload: {} });
     }
   };
 
   const handleTelegramMonitor = async () => {
     if (!selectedDomain || !state.scan?.id) return;
     setActiveAction('telegram');
-    dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_STARTED', domain: selectedDomain });
     try {
       await apiClient.post(`/scans/${state.scan.id}/telegram-monitor`, {
         domain: selectedDomain,
@@ -87,14 +96,12 @@ export function ThreatIntelTab() {
       console.error('Telegram monitor failed:', err);
     } finally {
       setActiveAction(null);
-      dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_COMPLETED', payload: {} });
     }
   };
 
   const handleAhmiaSearch = async () => {
     if (!selectedDomain || !state.scan?.id) return;
     setActiveAction('ahmia');
-    dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_STARTED', domain: selectedDomain });
     try {
       await apiClient.post(`/scans/${state.scan.id}/ahmia-search`, { domain: selectedDomain });
     } catch (err: any) {
@@ -102,7 +109,6 @@ export function ThreatIntelTab() {
       console.warn('Ahmia search endpoint not available:', err?.response?.status);
     } finally {
       setActiveAction(null);
-      dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_COMPLETED', payload: {} });
     }
   };
 
@@ -142,52 +148,52 @@ export function ThreatIntelTab() {
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button
             className="ws-enrich-btn"
-            disabled={!selectedDomain || activeAction !== null}
+            disabled={!selectedDomain || currentAction !== null}
             onClick={handleScanSecrets}
             title="Scan GitHub for leaked secrets — results appear in the Secrets tab"
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 5,
               padding: '5px 12px', borderRadius: 6, fontSize: 11, fontWeight: 500,
               border: '1px solid var(--border)',
-              cursor: (!selectedDomain || activeAction !== null) ? 'not-allowed' : 'pointer',
-              opacity: (!selectedDomain || activeAction !== null) ? 0.5 : 1,
+              cursor: (!selectedDomain || currentAction !== null) ? 'not-allowed' : 'pointer',
+              opacity: (!selectedDomain || currentAction !== null) ? 0.5 : 1,
               background: 'var(--bg-secondary)', color: 'var(--text)',
             }}
           >
-            {activeAction === 'secrets' ? <Loader2 size={11} className="animate-spin" /> : <Search size={11} />}
+            {currentAction === 'secrets' ? <Loader2 size={11} className="animate-spin" /> : <Search size={11} />}
             Scan Secrets
           </button>
           <button
             className="ws-enrich-btn"
-            disabled={!selectedDomain || activeAction !== null}
+            disabled={!selectedDomain || currentAction !== null}
             onClick={handleRunDnstwist}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 5,
               padding: '5px 12px', borderRadius: 6, fontSize: 11, fontWeight: 500,
               border: '1px solid var(--border)',
-              cursor: (!selectedDomain || activeAction !== null) ? 'not-allowed' : 'pointer',
-              opacity: (!selectedDomain || activeAction !== null) ? 0.5 : 1,
+              cursor: (!selectedDomain || currentAction !== null) ? 'not-allowed' : 'pointer',
+              opacity: (!selectedDomain || currentAction !== null) ? 0.5 : 1,
               background: 'var(--bg-secondary)', color: 'var(--text)',
             }}
           >
-            {activeAction === 'dnstwist' ? <Loader2 size={11} className="animate-spin" /> : <Search size={11} />}
+            {currentAction === 'dnstwist' ? <Loader2 size={11} className="animate-spin" /> : <Search size={11} />}
             Run dnstwist
           </button>
           <button
             className="ws-enrich-btn"
-            disabled={!selectedDomain || activeAction !== null}
+            disabled={!selectedDomain || currentAction !== null}
             onClick={handleAhmiaSearch}
             title="Search Ahmia.fi for .onion mentions of the domain"
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 5,
               padding: '5px 12px', borderRadius: 6, fontSize: 11, fontWeight: 500,
               border: '1px solid var(--border)',
-              cursor: (!selectedDomain || activeAction !== null) ? 'not-allowed' : 'pointer',
-              opacity: (!selectedDomain || activeAction !== null) ? 0.5 : 1,
+              cursor: (!selectedDomain || currentAction !== null) ? 'not-allowed' : 'pointer',
+              opacity: (!selectedDomain || currentAction !== null) ? 0.5 : 1,
               background: 'var(--bg-secondary)', color: 'var(--text)',
             }}
           >
-            {activeAction === 'ahmia' ? <Loader2 size={11} className="animate-spin" /> : <Globe size={11} />}
+            {currentAction === 'ahmia' ? <Loader2 size={11} className="animate-spin" /> : <Globe size={11} />}
             Search Dark Web
           </button>
           <div style={{ flex: 1 }} />
@@ -204,28 +210,28 @@ export function ThreatIntelTab() {
           />
           <button
             className="ws-enrich-btn"
-            disabled={!selectedDomain || activeAction !== null}
+            disabled={!selectedDomain || currentAction !== null}
             onClick={handleTelegramMonitor}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 5,
               padding: '5px 12px', borderRadius: 6, fontSize: 11, fontWeight: 500,
               border: '1px solid var(--border)',
-              cursor: (!selectedDomain || activeAction !== null) ? 'not-allowed' : 'pointer',
-              opacity: (!selectedDomain || activeAction !== null) ? 0.5 : 1,
+              cursor: (!selectedDomain || currentAction !== null) ? 'not-allowed' : 'pointer',
+              opacity: (!selectedDomain || currentAction !== null) ? 0.5 : 1,
               background: 'var(--bg-secondary)', color: 'var(--text)',
             }}
           >
-            {activeAction === 'telegram' ? <Loader2 size={11} className="animate-spin" /> : <MessageCircle size={11} />}
+            {currentAction === 'telegram' ? <Loader2 size={11} className="animate-spin" /> : <MessageCircle size={11} />}
             Monitor Telegram
           </button>
         </div>
 
-        {activeAction && (
+        {currentAction && (
           <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-            {activeAction === 'secrets' && `Scanning ${selectedDomain} for leaked secrets...`}
-            {activeAction === 'dnstwist' && `Generating lookalike permutations for ${selectedDomain}...`}
-            {activeAction === 'telegram' && `Searching Telegram for "${domainKeyword}" mentions...`}
-            {activeAction === 'ahmia' && `Searching Ahmia.fi for .onion mentions of ${selectedDomain}...`}
+            {currentAction === 'secrets' && `Scanning ${selectedDomain} for leaked secrets...`}
+            {currentAction === 'dnstwist' && `Generating lookalike permutations for ${selectedDomain}...`}
+            {currentAction === 'telegram' && `Searching Telegram for "${domainKeyword}" mentions...`}
+            {currentAction === 'ahmia' && `Searching Ahmia.fi for .onion mentions of ${selectedDomain}...`}
           </div>
         )}
 

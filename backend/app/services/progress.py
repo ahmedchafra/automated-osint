@@ -28,6 +28,20 @@ from app.config import settings
 logger = logging.getLogger("osint.progress")
 
 
+def _is_worker_shutdown_error(exc: BaseException) -> bool:
+    """Identify expected Redis failures while Celery terminates a child."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, SystemExit):
+            return True
+        if "executor shutdown has been called" in str(current).lower():
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 @asynccontextmanager
 async def _redis_client() -> AsyncIterator[aioredis.Redis]:
     """Open a fresh Redis connection for the current loop and close it on exit."""
@@ -37,8 +51,9 @@ async def _redis_client() -> AsyncIterator[aioredis.Redis]:
     finally:
         try:
             await client.aclose()
-        except Exception:
-            logger.exception("failed to close redis progress client")
+        except Exception as exc:
+            if not _is_worker_shutdown_error(exc):
+                logger.exception("failed to close redis progress client")
 
 
 class ScanProgressPublisher:
@@ -59,5 +74,12 @@ class ScanProgressPublisher:
         try:
             async with _redis_client() as client:
                 await client.publish(f"scan:{scan_id}", json.dumps(message))
-        except Exception:
+        except Exception as exc:
+            if _is_worker_shutdown_error(exc):
+                logger.debug(
+                    "skipped progress event %s during worker shutdown for scan %s",
+                    event,
+                    scan_id,
+                )
+                return
             logger.exception("failed to publish progress event %s for scan %s", event, scan_id)

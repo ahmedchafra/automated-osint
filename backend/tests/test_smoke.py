@@ -29,10 +29,12 @@ def client(monkeypatch, tmp_path):
 
     from app.main import app
 
-    def fake_delay(scan_id):
-        return SimpleNamespace(id=f"task-{scan_id}")
+    def fake_apply_async(*, args, kwargs, task_id):
+        return SimpleNamespace(id=task_id)
 
-    monkeypatch.setattr("app.api.scans.execute_scan_task.delay", fake_delay)
+    monkeypatch.setattr(
+        "app.api.scans.execute_scan_task.apply_async", fake_apply_async
+    )
 
     with TestClient(app) as test_client:
         yield test_client
@@ -65,7 +67,7 @@ def test_scan_crud_flow(client):
     assert create_response.status_code == 202
     created = create_response.json()
     scan_id = created["scan"]["id"]
-    assert created["task_id"] == f"task-{scan_id}"
+    assert created["task_id"]
     assert created["scan"]["status"] == "QUEUED"
     assert created["scan"]["target_usernames"] == ["example"]
 
@@ -80,6 +82,14 @@ def test_scan_crud_flow(client):
     detail = detail_response.json()
     assert detail["id"] == scan_id
     assert detail["findings"] == []
+
+    jobs_response = client.get(f"/api/scans/{scan_id}/jobs", headers=headers)
+    assert jobs_response.status_code == 200
+    jobs = jobs_response.json()
+    assert len(jobs) == 1
+    assert jobs[0]["celery_task_id"] == created["task_id"]
+    assert jobs[0]["status"] == "QUEUED"
+    assert jobs[0]["stage"] == "full_scan"
 
 
 def test_cancel_scan_revokes_exact_task(monkeypatch, client):
@@ -108,11 +118,84 @@ def test_cancel_scan_revokes_exact_task(monkeypatch, client):
 
     assert response.status_code == 200
     assert response.json()["revoked"] is True
+    assert response.json()["revoked_task_ids"] == [expected_task_id]
     assert calls == [
         (expected_task_id, {"terminate": True, "signal": "SIGTERM"})
     ]
     detail = client.get(f"/api/scans/{scan_id}", headers=headers).json()
     assert detail["status"] == "CANCELLED"
+
+
+def test_cancel_completed_scan_revokes_active_child_job(monkeypatch, client):
+    import asyncio
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+
+    from app.database import AsyncSessionLocal
+    from app.models.scan import Scan
+    from app.models.scan_job import ScanJob
+
+    headers = {"X-API-Key": API_KEY}
+    created = client.post(
+        "/api/scans",
+        headers=headers,
+        json={
+            "target_domain": "example.com",
+            "selected_vectors": ["INFRASTRUCTURE"],
+            "target_usernames": [],
+        },
+    ).json()
+    scan_id = created["scan"]["id"]
+    child_task_id = "child-enrichment-task"
+
+    async def seed_active_child():
+        async with AsyncSessionLocal() as session:
+            scan = await session.get(Scan, scan_id)
+            scan.status = "COMPLETED"
+            scan.completed_at = datetime.now(timezone.utc)
+            primary_job = (
+                await session.execute(
+                    select(ScanJob).where(ScanJob.scan_id == scan_id)
+                )
+            ).scalar_one()
+            primary_job.status = "COMPLETED"
+            primary_job.completed_at = datetime.now(timezone.utc)
+            session.add(
+                ScanJob(
+                    scan_id=scan_id,
+                    celery_task_id=child_task_id,
+                    job_type="shodan_enrich",
+                    stage="service_enrichment",
+                    status="RUNNING",
+                    progress={},
+                    result_summary={},
+                )
+            )
+            await session.commit()
+
+    asyncio.run(seed_active_child())
+
+    calls = []
+    from app.workers.celery_app import celery_app
+
+    monkeypatch.setattr(
+        celery_app.control,
+        "revoke",
+        lambda task_id, **kwargs: calls.append((task_id, kwargs)),
+    )
+    response = client.post(f"/api/scans/{scan_id}/cancel", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["revoked_task_ids"] == [child_task_id]
+    assert calls == [
+        (child_task_id, {"terminate": True, "signal": "SIGTERM"})
+    ]
+    detail = client.get(f"/api/scans/{scan_id}", headers=headers).json()
+    assert detail["status"] == "COMPLETED"
+    jobs = client.get(f"/api/scans/{scan_id}/jobs", headers=headers).json()
+    child = next(job for job in jobs if job["celery_task_id"] == child_task_id)
+    assert child["status"] == "CANCELLED"
 
 
 def test_new_collectors_are_registered():

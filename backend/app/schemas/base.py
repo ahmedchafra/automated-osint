@@ -230,6 +230,25 @@ class ScanCreateResponse(SchemaBase):
     scan: ScanResponse
 
 
+class ScanJobResponse(SchemaBase):
+    id: str
+    scan_id: str
+    parent_job_id: Optional[str] = None
+    celery_task_id: str
+    job_type: str
+    stage: str
+    status: str
+    input_type: Optional[str] = None
+    input_value: Optional[str] = None
+    progress: Dict[str, Any] = Field(default_factory=dict)
+    result_summary: Dict[str, Any] = Field(default_factory=dict)
+    error: Optional[str] = None
+    created_at: datetime
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    updated_at: datetime
+
+
 class ScanDetailResponse(ScanResponse):
     findings: List["FindingResponse"] = Field(default_factory=list)
 

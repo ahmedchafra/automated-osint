@@ -13,8 +13,9 @@ from app.models.finding import Finding
 from app.models.scan_collaborator import ScanCollaborator
 from app.config import settings
 from app.database import get_db
-from app.schemas.base import AIDorkRequest, CensysEnrichRequest, DomainDeepAnalysisRequest, DnstwistRequest, EmailBreachRequest, EmailDeepAnalysisRequest, PivotRequest, ScanCreate, ScanCreateSimple, ScanCreateV2, ScanCreateResponse, ScanDetailResponse, ScanResponse, SetPrimaryDomainRequest, ShodanEnrichRequest, SubdomainEnrichRequest, TelegramMonitorRequest, ThreatIntelRequest
+from app.schemas.base import AIDorkRequest, CensysEnrichRequest, DomainDeepAnalysisRequest, DnstwistRequest, EmailBreachRequest, EmailDeepAnalysisRequest, PivotRequest, ScanCreate, ScanCreateSimple, ScanCreateV2, ScanCreateResponse, ScanDetailResponse, ScanJobResponse, ScanResponse, SetPrimaryDomainRequest, ShodanEnrichRequest, SubdomainEnrichRequest, TelegramMonitorRequest, ThreatIntelRequest
 from app.models.scan import Scan
+from app.models.scan_job import ScanJob
 from app.core.auth import get_authenticated_user, can_read_scan, can_modify_scan
 from app.schemas.auth import AddScanCollaboratorRequest, ScanCollaboratorResponse, ScanPermissionResponse
 from app.workers.scan_tasks import execute_scan_task
@@ -34,6 +35,7 @@ from app.workers.telegram_task import telegram_monitor_task
 from app.workers.ahmia_task import ahmia_search_task
 from app.workers.ip_scan import execute_ip_scan_task
 from app.workers.org_scan import execute_org_scan_task, execute_org_infra_task
+from app.services.job_service import dispatch_scan_job
 
 logger = logging.getLogger("osint.api.scans")
 
@@ -63,6 +65,17 @@ async def _check_and_set_running_lock(
         return True
 
 
+async def _clear_running_lock(lock_key: str) -> None:
+    try:
+        client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        try:
+            await client.delete(lock_key)
+        finally:
+            await client.aclose()
+    except Exception:
+        logger.exception("failed to clear running lock %s", lock_key)
+
+
 router = APIRouter(dependencies=[Depends(get_authenticated_user)])
 
 @router.post("/", response_model=ScanCreateResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -82,13 +95,21 @@ async def create_scan(
     await db.commit()
     await db.refresh(db_scan)
     
-    async_result = execute_scan_task.delay(db_scan.id)
-    db_scan.celery_task_id = async_result.id
+    job = await dispatch_scan_job(
+        db,
+        execute_scan_task,
+        db_scan.id,
+        job_type="execute_scan",
+        stage="full_scan",
+        input_type="domain",
+        input_value=db_scan.target_domain,
+    )
+    db_scan.celery_task_id = job.celery_task_id
     await db.commit()
     await db.refresh(db_scan)
 
     return {
-        "task_id": async_result.id,
+        "task_id": job.celery_task_id,
         "scan": db_scan,
     }
 
@@ -143,13 +164,21 @@ async def create_initial_scan(
     await db.commit()
     await db.refresh(db_scan)
 
-    async_result = execute_initial_scan_task.delay(db_scan.id)
-    db_scan.celery_task_id = async_result.id
+    job = await dispatch_scan_job(
+        db,
+        execute_initial_scan_task,
+        db_scan.id,
+        job_type="execute_initial_scan",
+        stage="discovery",
+        input_type="domain",
+        input_value=db_scan.target_domain,
+    )
+    db_scan.celery_task_id = job.celery_task_id
     await db.commit()
     await db.refresh(db_scan)
 
     return {
-        "task_id": async_result.id,
+        "task_id": job.celery_task_id,
         "scan": db_scan,
     }
 
@@ -190,13 +219,21 @@ async def create_ip_scan(
     await db.commit()
     await db.refresh(db_scan)
 
-    async_result = execute_ip_scan_task.delay(db_scan.id)
-    db_scan.celery_task_id = async_result.id
+    job = await dispatch_scan_job(
+        db,
+        execute_ip_scan_task,
+        db_scan.id,
+        job_type="execute_ip_scan",
+        stage="discovery",
+        input_type="ip",
+        input_value=db_scan.target_domain,
+    )
+    db_scan.celery_task_id = job.celery_task_id
     await db.commit()
     await db.refresh(db_scan)
 
     return {
-        "task_id": async_result.id,
+        "task_id": job.celery_task_id,
         "scan": db_scan,
     }
 
@@ -228,13 +265,21 @@ async def create_org_scan(
     await db.commit()
     await db.refresh(db_scan)
 
-    async_result = execute_org_scan_task.delay(db_scan.id)
-    db_scan.celery_task_id = async_result.id
+    job = await dispatch_scan_job(
+        db,
+        execute_org_scan_task,
+        db_scan.id,
+        job_type="execute_org_scan",
+        stage="organization_discovery",
+        input_type="organization",
+        input_value=db_scan.target_domain,
+    )
+    db_scan.celery_task_id = job.celery_task_id
     await db.commit()
     await db.refresh(db_scan)
 
     return {
-        "task_id": async_result.id,
+        "task_id": job.celery_task_id,
         "scan": db_scan,
     }
 
@@ -243,6 +288,7 @@ async def create_org_scan(
 async def trigger_org_infra(
     scan_id: str,
     body: SetPrimaryDomainRequest,
+    db: AsyncSession = Depends(get_db),
     scan: Scan = Depends(can_modify_scan()),
 ):
     """Run the full infrastructure pipeline on a user-selected domain.
@@ -258,9 +304,21 @@ async def trigger_org_infra(
             detail="run-infra is only supported for organization scans",
         )
 
-    async_result = execute_org_infra_task.delay(scan_id, body.domain)
+    scan.target_domain = body.domain
+    scan.status = "RUNNING"
+    scan.completed_at = None
+    job = await dispatch_scan_job(
+        db,
+        execute_org_infra_task,
+        scan_id,
+        job_type="execute_org_infra",
+        stage="infrastructure_enrichment",
+        input_type="domain",
+        input_value=body.domain,
+        task_args=(body.domain,),
+    )
     return {
-        "task_id": async_result.id,
+        "task_id": job.celery_task_id,
         "scan_id": scan_id,
         "domain": body.domain,
     }
@@ -343,33 +401,78 @@ async def get_scan(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_authenticated_user),
 ):
-    """Get scan details with findings.
+    """Get scan metadata and aggregate counts.
 
     Requires read access to the scan (owner, admin, or collaborator).
+    Findings are served separately through the paginated findings endpoint.
     """
     # Permission check — use the same logic as can_read_scan but inline
     # to avoid duplicate db sessions
     from app.core.auth import check_scan_access
     db_scan = await check_scan_access(db, scan_id, current_user, require_modify=False)
 
-    db_scan.findings_count = len(db_scan.findings) if hasattr(db_scan, 'findings') else 0
+    finding_count_result = await db.execute(
+        select(func.count(Finding.id)).where(Finding.scan_id == scan_id)
+    )
+    findings_count = finding_count_result.scalar_one()
     from app.models.entity_link import EntityLink
     link_stmt = select(func.count(EntityLink.id)).where(EntityLink.scan_id == scan_id)
     link_result = await db.execute(link_stmt)
-    db_scan.links_count = link_result.scalar_one()
-    return db_scan
+    links_count = link_result.scalar_one()
+    return {
+        "id": db_scan.id,
+        "target_domain": db_scan.target_domain,
+        "target_type": db_scan.target_type,
+        "status": db_scan.status,
+        "celery_task_id": db_scan.celery_task_id,
+        "selected_vectors": db_scan.selected_vectors,
+        "target_usernames": db_scan.target_usernames,
+        "created_at": db_scan.created_at,
+        "completed_at": db_scan.completed_at,
+        "updated_at": db_scan.updated_at,
+        "findings_count": findings_count,
+        "links_count": links_count,
+        "findings": [],
+    }
+
+
+@router.get("/{scan_id}/jobs", response_model=List[ScanJobResponse])
+async def list_scan_jobs(
+    scan_id: str,
+    limit: int = Query(200, ge=1, le=1000),
+    db: AsyncSession = Depends(get_db),
+    scan: Scan = Depends(can_read_scan()),
+):
+    """Return persisted background jobs for a scan, newest first."""
+    result = await db.execute(
+        select(ScanJob)
+        .where(ScanJob.scan_id == scan_id)
+        .order_by(ScanJob.created_at.desc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())
 
 
 @router.post("/{scan_id}/pivot", status_code=status.HTTP_202_ACCEPTED)
 async def trigger_pivot(
     scan_id: str,
     body: PivotRequest,
+    db: AsyncSession = Depends(get_db),
     scan: Scan = Depends(can_modify_scan()),
 ):
     """Trigger a per-email pivot sweep (holehe + maigret + hibp)."""
-    async_result = pivot_sweep_task.delay(scan_id, body.email)
+    job = await dispatch_scan_job(
+        db,
+        pivot_sweep_task,
+        scan_id,
+        job_type="pivot_sweep",
+        stage="identity",
+        input_type="email",
+        input_value=body.email,
+        task_args=(body.email,),
+    )
     return {
-        "task_id": async_result.id,
+        "task_id": job.celery_task_id,
         "scan_id": scan_id,
         "email": body.email,
     }
@@ -379,12 +482,22 @@ async def trigger_pivot(
 async def trigger_subdomain_enrich(
     scan_id: str,
     body: SubdomainEnrichRequest,
+    db: AsyncSession = Depends(get_db),
     scan: Scan = Depends(can_modify_scan()),
 ):
     """Trigger Hunter + XposedOrNot on user-selected subdomains."""
-    async_result = subdomain_enrich_task.delay(scan_id, body.subdomains)
+    job = await dispatch_scan_job(
+        db,
+        subdomain_enrich_task,
+        scan_id,
+        job_type="subdomain_enrich",
+        stage="identity",
+        input_type="domain_list",
+        input_value=body.subdomains,
+        task_args=(body.subdomains,),
+    )
     return {
-        "task_id": async_result.id,
+        "task_id": job.celery_task_id,
         "scan_id": scan_id,
         "subdomains": body.subdomains,
     }
@@ -394,12 +507,22 @@ async def trigger_subdomain_enrich(
 async def trigger_email_breach(
     scan_id: str,
     body: EmailBreachRequest,
+    db: AsyncSession = Depends(get_db),
     scan: Scan = Depends(can_modify_scan()),
 ):
     """Trigger XposedOrNot breach check on selected emails."""
-    async_result = email_breach_task.delay(scan_id, body.emails)
+    job = await dispatch_scan_job(
+        db,
+        email_breach_task,
+        scan_id,
+        job_type="email_breach_check",
+        stage="identity",
+        input_type="email_list",
+        input_value=body.emails,
+        task_args=(body.emails,),
+    )
     return {
-        "task_id": async_result.id,
+        "task_id": job.celery_task_id,
         "scan_id": scan_id,
         "emails": body.emails,
     }
@@ -409,6 +532,7 @@ async def trigger_email_breach(
 async def trigger_domain_deep_analysis(
     scan_id: str,
     body: DomainDeepAnalysisRequest,
+    db: AsyncSession = Depends(get_db),
     scan: Scan = Depends(can_modify_scan()),
 ):
     """Trigger hunter + theharvester + github_secrets + dnstwist on a domain (all in parallel).
@@ -428,13 +552,23 @@ async def trigger_domain_deep_analysis(
             detail=f"Deep analysis already running for domain '{body.domain}'",
         )
 
-    async_result = domain_deep_analysis_task.delay(
-        scan_id,
-        body.domain,
-        theharvester_mode=body.theharvester_mode,
-    )
+    try:
+        job = await dispatch_scan_job(
+            db,
+            domain_deep_analysis_task,
+            scan_id,
+            job_type="domain_deep_analysis",
+            stage="deep_analysis",
+            input_type="domain",
+            input_value=body.domain,
+            task_args=(body.domain,),
+            task_kwargs={"theharvester_mode": body.theharvester_mode},
+        )
+    except Exception:
+        await _clear_running_lock(lock_key)
+        raise
     return {
-        "task_id": async_result.id,
+        "task_id": job.celery_task_id,
         "scan_id": scan_id,
         "domain": body.domain,
         "theharvester_mode": body.theharvester_mode,
@@ -445,6 +579,7 @@ async def trigger_domain_deep_analysis(
 async def trigger_secrets_scan(
     scan_id: str,
     body: DomainDeepAnalysisRequest,
+    db: AsyncSession = Depends(get_db),
     scan: Scan = Depends(can_modify_scan()),
 ):
     """Lightweight endpoint: only runs github_secrets collector (no full deep analysis).
@@ -452,9 +587,18 @@ async def trigger_secrets_scan(
     Much faster than /domain-deep-analysis — searches GitHub public repos for
     leaked secrets and repos mentioning the target domain. Used by the Secrets tab.
     """
-    async_result = github_secrets_scan_task.delay(scan_id, body.domain)
+    job = await dispatch_scan_job(
+        db,
+        github_secrets_scan_task,
+        scan_id,
+        job_type="github_secrets_scan",
+        stage="secrets",
+        input_type="domain",
+        input_value=body.domain,
+        task_args=(body.domain,),
+    )
     return {
-        "task_id": async_result.id,
+        "task_id": job.celery_task_id,
         "scan_id": scan_id,
         "domain": body.domain,
     }
@@ -464,12 +608,22 @@ async def trigger_secrets_scan(
 async def trigger_email_deep_analysis(
     scan_id: str,
     body: EmailDeepAnalysisRequest,
+    db: AsyncSession = Depends(get_db),
     scan: Scan = Depends(can_modify_scan()),
 ):
     """Trigger xposedornot + holehe + maigret on selected emails."""
-    async_result = email_deep_analysis_task.delay(scan_id, body.emails)
+    job = await dispatch_scan_job(
+        db,
+        email_deep_analysis_task,
+        scan_id,
+        job_type="email_deep_analysis",
+        stage="identity",
+        input_type="email_list",
+        input_value=body.emails,
+        task_args=(body.emails,),
+    )
     return {
-        "task_id": async_result.id,
+        "task_id": job.celery_task_id,
         "scan_id": scan_id,
         "emails": body.emails,
     }
@@ -479,12 +633,22 @@ async def trigger_email_deep_analysis(
 async def trigger_threat_intel(
     scan_id: str,
     body: ThreatIntelRequest,
+    db: AsyncSession = Depends(get_db),
     scan: Scan = Depends(can_modify_scan()),
 ):
     """Trigger GitHub secrets + dnstwist scan on a domain."""
-    async_result = threat_intel_task.delay(scan_id, body.domain)
+    job = await dispatch_scan_job(
+        db,
+        threat_intel_task,
+        scan_id,
+        job_type="threat_intel_scan",
+        stage="threat_intelligence",
+        input_type="domain",
+        input_value=body.domain,
+        task_args=(body.domain,),
+    )
     return {
-        "task_id": async_result.id,
+        "task_id": job.celery_task_id,
         "scan_id": scan_id,
         "domain": body.domain,
     }
@@ -494,6 +658,7 @@ async def trigger_threat_intel(
 async def trigger_shodan_enrich(
     scan_id: str,
     body: ShodanEnrichRequest,
+    db: AsyncSession = Depends(get_db),
     scan: Scan = Depends(can_modify_scan()),
 ):
     """Trigger Shodan and/or Censys Host API enrichment on a specific IP.
@@ -507,11 +672,29 @@ async def trigger_shodan_enrich(
     task_ids = []
 
     if provider in ("shodan", "both"):
-        r = shodan_enrich_task.delay(scan_id, body.ip)
-        task_ids.append(r.id)
+        job = await dispatch_scan_job(
+            db,
+            shodan_enrich_task,
+            scan_id,
+            job_type="shodan_enrich",
+            stage="service_enrichment",
+            input_type="ip",
+            input_value=body.ip,
+            task_args=(body.ip,),
+        )
+        task_ids.append(job.celery_task_id)
     if provider in ("censys", "both"):
-        r = censys_enrich_task.delay(scan_id, body.ip)
-        task_ids.append(r.id)
+        job = await dispatch_scan_job(
+            db,
+            censys_enrich_task,
+            scan_id,
+            job_type="censys_enrich",
+            stage="service_enrichment",
+            input_type="ip",
+            input_value=body.ip,
+            task_args=(body.ip,),
+        )
+        task_ids.append(job.celery_task_id)
 
     return {
         "task_ids": task_ids,
@@ -525,6 +708,7 @@ async def trigger_shodan_enrich(
 async def trigger_censys_enrich(
     scan_id: str,
     body: CensysEnrichRequest,
+    db: AsyncSession = Depends(get_db),
     scan: Scan = Depends(can_modify_scan()),
 ):
     """Trigger Censys Host API enrichment on a specific IP.
@@ -532,9 +716,18 @@ async def trigger_censys_enrich(
     Runs the Censys Host API to get detailed port/service/vulnerability
     data for a single IP. Uses Censys search credits.
     """
-    async_result = censys_enrich_task.delay(scan_id, body.ip)
+    job = await dispatch_scan_job(
+        db,
+        censys_enrich_task,
+        scan_id,
+        job_type="censys_enrich",
+        stage="service_enrichment",
+        input_type="ip",
+        input_value=body.ip,
+        task_args=(body.ip,),
+    )
     return {
-        "task_id": async_result.id,
+        "task_id": job.celery_task_id,
         "scan_id": scan_id,
         "ip": body.ip,
     }
@@ -544,6 +737,7 @@ async def trigger_censys_enrich(
 async def trigger_dnstwist(
     scan_id: str,
     body: DnstwistRequest,
+    db: AsyncSession = Depends(get_db),
     scan: Scan = Depends(can_modify_scan()),
 ):
     """Trigger dnstwist lookalike domain detection on a domain.
@@ -551,9 +745,18 @@ async def trigger_dnstwist(
     Generates permutations of the domain and checks which are actively
     registered (DNS resolution). Results appear in Brand Protection tab.
     """
-    async_result = dnstwist_only_task.delay(scan_id, body.domain)
+    job = await dispatch_scan_job(
+        db,
+        dnstwist_only_task,
+        scan_id,
+        job_type="dnstwist_only",
+        stage="brand_protection",
+        input_type="domain",
+        input_value=body.domain,
+        task_args=(body.domain,),
+    )
     return {
-        "task_id": async_result.id,
+        "task_id": job.celery_task_id,
         "scan_id": scan_id,
         "domain": body.domain,
     }
@@ -563,6 +766,7 @@ async def trigger_dnstwist(
 async def trigger_ahmia_search(
     scan_id: str,
     body: DnstwistRequest,
+    db: AsyncSession = Depends(get_db),
     scan: Scan = Depends(can_modify_scan()),
 ):
     """Search Ahmia.fi for .onion sites mentioning the domain.
@@ -571,9 +775,18 @@ async def trigger_ahmia_search(
     domain or keyword. Results appear in the Threat Intel tab as
     ONION_SITE findings.
     """
-    async_result = ahmia_search_task.delay(scan_id, body.domain)
+    job = await dispatch_scan_job(
+        db,
+        ahmia_search_task,
+        scan_id,
+        job_type="ahmia_search",
+        stage="threat_intelligence",
+        input_type="domain",
+        input_value=body.domain,
+        task_args=(body.domain,),
+    )
     return {
-        "task_id": async_result.id,
+        "task_id": job.celery_task_id,
         "scan_id": scan_id,
         "domain": body.domain,
     }
@@ -583,6 +796,7 @@ async def trigger_ahmia_search(
 async def trigger_telegram_monitor(
     scan_id: str,
     body: TelegramMonitorRequest,
+    db: AsyncSession = Depends(get_db),
     scan: Scan = Depends(can_modify_scan()),
 ):
     """Trigger Telegram monitoring for a keyword.
@@ -591,9 +805,18 @@ async def trigger_telegram_monitor(
     and messages for mentions of the keyword. Results appear in Threat
     Intel tab as TELEGRAM_MESSAGE and TELEGRAM_CHANNEL findings.
     """
-    async_result = telegram_monitor_task.delay(scan_id, body.keyword)
+    job = await dispatch_scan_job(
+        db,
+        telegram_monitor_task,
+        scan_id,
+        job_type="telegram_monitor",
+        stage="threat_intelligence",
+        input_type="keyword",
+        input_value=body.keyword,
+        task_args=(body.keyword,),
+    )
     return {
-        "task_id": async_result.id,
+        "task_id": job.celery_task_id,
         "scan_id": scan_id,
         "keyword": body.keyword,
     }
@@ -603,12 +826,22 @@ async def trigger_telegram_monitor(
 async def trigger_ai_dork(
     scan_id: str,
     body: AIDorkRequest,
+    db: AsyncSession = Depends(get_db),
     scan: Scan = Depends(can_modify_scan()),
 ):
     """Trigger an AI-powered Google Dork generation and search for a scan."""
-    async_result = run_ai_dork_task.delay(scan_id, body.prompt)
+    job = await dispatch_scan_job(
+        db,
+        run_ai_dork_task,
+        scan_id,
+        job_type="run_ai_dork_task",
+        stage="search",
+        input_type="prompt",
+        input_value=body.prompt,
+        task_args=(body.prompt,),
+    )
     return {
-        "task_id": async_result.id,
+        "task_id": job.celery_task_id,
         "scan_id": scan_id,
     }
 
@@ -619,37 +852,60 @@ async def cancel_scan(
     db: AsyncSession = Depends(get_db),
     scan: Scan = Depends(can_modify_scan()),
 ):
-    """Cancel a running or queued scan.
+    """Cancel every active Celery job belonging to a scan."""
+    active_jobs = list(
+        (
+            await db.execute(
+                select(ScanJob).where(
+                    ScanJob.scan_id == scan_id,
+                    ScanJob.status.in_(("QUEUED", "RUNNING", "RETRYING")),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
 
-    Sets the scan status to CANCELLED and revokes its exact Celery task.
-    Only RUNNING, QUEUED, and PENDING scans can be cancelled.
-    Requires modify permission on the scan.
-    """
-    if scan.status in ("COMPLETED", "FAILED", "CANCELLED"):
+    scan_is_active = scan.status in ("RUNNING", "QUEUED", "PENDING")
+    if not scan_is_active and not active_jobs:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Cannot cancel a scan with status {scan.status}. Only active scans can be cancelled.",
+            detail=f"Scan {scan_id} has no active work to cancel.",
         )
 
     from datetime import datetime, timezone
 
-    scan.status = "CANCELLED"
-    scan.completed_at = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    if scan_is_active:
+        scan.status = "CANCELLED"
+        scan.completed_at = now
+
+    task_ids = {job.celery_task_id for job in active_jobs}
+    if scan_is_active and scan.celery_task_id:
+        task_ids.add(scan.celery_task_id)
+    for job in active_jobs:
+        job.status = "CANCELLED"
+        job.completed_at = now
     await db.commit()
 
-    revoked = False
-    if scan.celery_task_id:
-        from app.workers.celery_app import celery_app
+    from app.workers.celery_app import celery_app
 
+    revoked_task_ids = []
+    for task_id in sorted(task_ids):
         try:
             celery_app.control.revoke(
-                scan.celery_task_id, terminate=True, signal="SIGTERM"
+                task_id, terminate=True, signal="SIGTERM"
             )
-            revoked = True
+            revoked_task_ids.append(task_id)
         except Exception:
-            logger.exception("failed to revoke Celery task %s", scan.celery_task_id)
+            logger.exception("failed to revoke Celery task %s", task_id)
 
-    return {"status": "cancelled", "scan_id": scan_id, "revoked": revoked}
+    return {
+        "status": "cancelled",
+        "scan_id": scan_id,
+        "revoked": bool(revoked_task_ids),
+        "revoked_task_ids": revoked_task_ids,
+    }
 
 
 @router.get("/{scan_id}/report")
@@ -1016,23 +1272,17 @@ async def set_primary_domain(
     scan_id: str,
     body: SetPrimaryDomainRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_authenticated_user),
+    scan: Scan = Depends(can_modify_scan()),
 ):
     """Set the primary domain for an organization scan.
 
-    Only the scan owner or an admin can change the primary domain.
+    Owners, admins, and collaborators with modify permission may change it.
     Intended for org scans where the auto-picked domain needs correction.
     """
-    stmt = select(Scan).where(Scan.id == scan_id)
-    result = await db.execute(stmt)
-    scan = result.scalar_one_or_none()
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
-
-    if current_user.role != "admin" and scan.owner_id != current_user.id:
+    if scan.target_type != "organization":
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only the scan owner or an admin can change the primary domain.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Primary-domain selection is only supported for organization scans.",
         )
 
     scan.target_domain = body.domain

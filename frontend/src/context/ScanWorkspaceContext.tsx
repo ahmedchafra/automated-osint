@@ -49,10 +49,31 @@ export interface ScanJob {
   updated_at: string;
 }
 
+export interface AssetRecord {
+  id: string;
+  scan_id: string;
+  asset_type: string;
+  value: string;
+  canonical_value: string;
+  registrable_domain?: string | null;
+  state: 'CANDIDATE' | 'RESOLVED' | 'LIVE';
+  in_scope: boolean;
+  wildcard_suspected: boolean;
+  source_modules: string[];
+  evidence_count: number;
+  dns_records: Record<string, unknown>;
+  resolved_ips: string[];
+  http_metadata: Record<string, unknown>;
+  created_at: string;
+  last_observed_at: string;
+  updated_at: string;
+}
+
 export interface ScanWorkspaceState {
   scan: any | null;
   findings: FindingRow[];
   jobs: ScanJob[];
+  assets: AssetRecord[];
   wsConnected: boolean;
   activeTab: TabId;
   eventLog: LogEvent[];
@@ -87,6 +108,7 @@ export type ScanWorkspaceAction =
   | { type: 'SET_TOTAL_VECTORS'; total: number }
   | { type: 'FINDINGS_UPDATED'; findings: FindingRow[]; payload?: any }
   | { type: 'JOBS_UPDATED'; jobs: ScanJob[] }
+  | { type: 'ASSETS_UPDATED'; assets: AssetRecord[] }
   | { type: 'FINDING_PUSHED'; finding: FindingRow; payload?: any }
   | { type: 'WS_CONNECTED' }
   | { type: 'WS_DISCONNECTED' }
@@ -116,6 +138,7 @@ const INITIAL_STATE: ScanWorkspaceState = {
   scan: null,
   findings: [],
   jobs: [],
+  assets: [],
   wsConnected: false,
   activeTab: 'infrastructure',
   eventLog: [],
@@ -147,6 +170,8 @@ function reducer(state: ScanWorkspaceState, action: ScanWorkspaceAction): ScanWo
       return { ...state, findings: action.findings };
     case 'JOBS_UPDATED':
       return { ...state, jobs: action.jobs };
+    case 'ASSETS_UPDATED':
+      return { ...state, assets: action.assets };
     case 'FINDING_PUSHED':
       return { ...state, findings: [...state.findings, action.finding] };
     case 'WS_CONNECTED':

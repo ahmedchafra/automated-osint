@@ -103,6 +103,16 @@ async def _run_org_domain_phase(scan_id: str, session, publisher, thread_pool) -
 
     total = 0
     org_name = scan.target_domain  # holds the org name
+    from app.services.asset_service import registrable_domain, upsert_asset
+
+    await upsert_asset(
+        session,
+        scan_id=scan_id,
+        asset_type="ORGANIZATION",
+        value=org_name,
+        state="CANDIDATE",
+        source_module="scan_target",
+    )
 
     await publisher.publish(scan_id, "phase_started", {
         "phase": "DISCOVERY", "phase_index": 1,
@@ -111,12 +121,28 @@ async def _run_org_domain_phase(scan_id: str, session, publisher, thread_pool) -
 
     # Serper-based domain discovery
     findings = await _run_tool("org_domain_discovery", org_name, scan_id, session, publisher, thread_pool)
-    total += await persist_findings(session, scan_id, findings)
 
     # Whoxy reverse-whois discovery
     whoxy_findings = await _run_tool("reverse_whois_whoxy", org_name, scan_id, session, publisher, thread_pool)
-    total += await persist_findings(session, scan_id, whoxy_findings)
     findings.extend(whoxy_findings)
+
+    for finding in findings:
+        value = str(finding.get("entity_value", ""))
+        if not value:
+            continue
+        normalized = finding.setdefault("normalized_data", {})
+        normalized["asset_state"] = "CANDIDATE"
+        normalized["registrable_domain"] = registrable_domain(value)
+        await upsert_asset(
+            session,
+            scan_id=scan_id,
+            asset_type="DOMAIN",
+            value=value,
+            state="CANDIDATE",
+            source_module=finding.get("source_module"),
+        )
+
+    total += await persist_findings(session, scan_id, findings)
 
     await session.commit()
 
@@ -144,12 +170,15 @@ async def _run_org_domain_phase(scan_id: str, session, publisher, thread_pool) -
     return primary_domain, findings, total
 
 
-async def _run_infra_phase(scan_id: str, domain: str, session, publisher) -> tuple[set, set, int]:
+async def _run_infra_phase(
+    scan_id: str, domain: str, session, publisher, scan_mode: str = "validated"
+) -> tuple[set, set, int]:
     """Run infrastructure discovery on a domain using the shared 6-tool pipeline."""
     from app.workers.initial_scan import run_domain_scan
 
     all_subdomains, resolved_ips, total = await run_domain_scan(
         domain, scan_id, session, publisher, free_only=True,
+        scan_mode=scan_mode,
     )
     return all_subdomains, resolved_ips, total
 
@@ -265,7 +294,7 @@ async def _run_org_infra(scan_id: str, domain: str) -> dict:
             })
 
             all_subdomains, resolved_ips, infra_findings = await _run_infra_phase(
-                scan_id, domain, session, publisher
+                scan_id, domain, session, publisher, scan.scan_mode
             )
             total_findings += infra_findings
             await session.commit()

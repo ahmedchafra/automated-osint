@@ -31,6 +31,11 @@ export function InfrastructureTab() {
     || activeJobs.some(job => job.job_type === 'email_deep_analysis');
 
   const mainDomain = state.scan?.target_domain || '';
+  const candidateAssets = state.assets.filter(asset => asset.state === 'CANDIDATE');
+  const resolvedAssets = state.assets.filter(asset => asset.state === 'RESOLVED');
+  const liveAssets = state.assets.filter(asset => asset.state === 'LIVE');
+  const wildcardAssets = state.assets.filter(asset => asset.wildcard_suspected);
+  const liveUrls = liveAssets.filter(asset => asset.asset_type === 'URL');
   const subdomains = useMemo(() => {
     const byValue = new Map<string, typeof state.findings[number]>();
     for (const finding of state.findings.filter(f => f.entity_type === 'SUBDOMAIN')) {
@@ -159,7 +164,7 @@ export function InfrastructureTab() {
     });
   };
 
-  if (subdomains.length === 0 && allIps.length === 0) {
+  if (subdomains.length === 0 && allIps.length === 0 && state.assets.length === 0) {
     return <div className="ws-empty">No infrastructure data yet. Run the INFRASTRUCTURE vector to populate this tab.</div>;
   }
 
@@ -202,6 +207,77 @@ export function InfrastructureTab() {
 
   return (
     <div className="ws-infra">
+      {state.assets.length > 0 && (
+        <div style={{
+          background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+          borderRadius: 8, padding: '12px 16px', marginBottom: 16,
+        }}>
+          <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
+            <div className="flex items-center gap-2">
+              <ShieldCheck size={14} />
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-strong)' }}>
+                Canonical Asset Inventory
+              </span>
+            </div>
+            <span style={{
+              padding: '2px 7px', borderRadius: 4, fontSize: 9,
+              textTransform: 'uppercase', fontFamily: 'var(--font-mono)',
+              background: 'var(--bg-primary)', color: 'var(--text-muted)',
+              border: '1px solid var(--border)',
+            }}>
+              {state.scan?.scan_mode || 'validated'} mode
+            </span>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 8 }}>
+            {[
+              ['Candidates', candidateAssets.length, 'var(--text-muted)'],
+              ['Resolved', resolvedAssets.length, 'var(--severity-info)'],
+              ['Live HTTP', liveUrls.length, '#10b981'],
+              ['Wildcard', wildcardAssets.length, '#f59e0b'],
+            ].map(([label, value, color]) => (
+              <div key={String(label)} style={{
+                padding: '8px 10px', borderRadius: 6, background: 'var(--bg-primary)',
+                border: '1px solid var(--border)',
+              }}>
+                <div style={{ fontSize: 9, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
+                  {label}
+                </div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: String(color), fontFamily: 'var(--font-mono)' }}>
+                  {value}
+                </div>
+              </div>
+            ))}
+          </div>
+          {liveUrls.length > 0 && (
+            <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {liveUrls.slice(0, 12).map(asset => (
+                <a
+                  key={asset.id}
+                  href={asset.canonical_value}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 5,
+                    padding: '3px 7px', borderRadius: 4, fontSize: 10,
+                    fontFamily: 'var(--font-mono)', color: '#10b981',
+                    background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.2)',
+                  }}
+                >
+                  <Globe size={10} />
+                  {asset.canonical_value}
+                  {asset.http_metadata?.status_code != null && ` [${String(asset.http_metadata.status_code)}]`}
+                </a>
+              ))}
+            </div>
+          )}
+          {wildcardAssets.length > 0 && (
+            <div style={{ marginTop: 8, fontSize: 10, color: '#f59e0b' }}>
+              {wildcardAssets.length} wildcard-matching hostname{wildcardAssets.length === 1 ? '' : 's'} retained as evidence and excluded from service fan-out.
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Subdomain table with search + pagination */}
       <div className="ws-enrich-panel" style={{
         background: 'var(--bg-secondary)',

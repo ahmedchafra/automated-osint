@@ -31,6 +31,7 @@ class Scan(BaseModel):
 
     findings = relationship("Finding", back_populates="scan", cascade="all, delete-orphan")
     jobs = relationship("ScanJob", back_populates="scan", cascade="all, delete-orphan")
+    assets = relationship("Asset", back_populates="scan", cascade="all, delete-orphan")
     owner = relationship("User", foreign_keys=[owner_id])
     collaborators = relationship("ScanCollaborator", back_populates="scan", cascade="all, delete-orphan")
 

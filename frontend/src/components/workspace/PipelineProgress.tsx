@@ -37,6 +37,8 @@ const TOOL_META: Record<string, { label: string; phase: string }> = {
   subfinder: { label: 'subfinder', phase: 'INFRASTRUCTURE' },
   theharvester: { label: 'theHarvester', phase: 'INFRASTRUCTURE' },
   dns_resolver: { label: 'DNS Resolver', phase: 'INFRASTRUCTURE' },
+  wildcard_dns: { label: 'Wildcard DNS Check', phase: 'INFRASTRUCTURE' },
+  http_probe: { label: 'HTTP Liveness', phase: 'INFRASTRUCTURE' },
   shodan_internetdb: { label: 'Shodan InternetDB', phase: 'INFRASTRUCTURE' },
   shodan_host: { label: 'Shodan Host', phase: 'SERVICES' },
   censys_host: { label: 'Censys Host', phase: 'SERVICES' },

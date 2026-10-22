@@ -69,6 +69,7 @@ def test_scan_crud_flow(client):
     scan_id = created["scan"]["id"]
     assert created["task_id"]
     assert created["scan"]["status"] == "QUEUED"
+    assert created["scan"]["scan_mode"] == "validated"
     assert created["scan"]["target_usernames"] == ["example"]
 
     list_response = client.get("/api/scans", headers=headers)
@@ -90,6 +91,10 @@ def test_scan_crud_flow(client):
     assert jobs[0]["celery_task_id"] == created["task_id"]
     assert jobs[0]["status"] == "QUEUED"
     assert jobs[0]["stage"] == "full_scan"
+
+    assets_response = client.get(f"/api/scans/{scan_id}/assets", headers=headers)
+    assert assets_response.status_code == 200
+    assert assets_response.json() == []
 
 
 def test_cancel_scan_revokes_exact_task(monkeypatch, client):

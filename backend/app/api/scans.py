@@ -13,9 +13,10 @@ from app.models.finding import Finding
 from app.models.scan_collaborator import ScanCollaborator
 from app.config import settings
 from app.database import get_db
-from app.schemas.base import AIDorkRequest, CensysEnrichRequest, DomainDeepAnalysisRequest, DnstwistRequest, EmailBreachRequest, EmailDeepAnalysisRequest, PivotRequest, ScanCreate, ScanCreateSimple, ScanCreateV2, ScanCreateResponse, ScanDetailResponse, ScanJobResponse, ScanResponse, SetPrimaryDomainRequest, ShodanEnrichRequest, SubdomainEnrichRequest, TelegramMonitorRequest, ThreatIntelRequest
+from app.schemas.base import AIDorkRequest, AssetResponse, CensysEnrichRequest, DomainDeepAnalysisRequest, DnstwistRequest, EmailBreachRequest, EmailDeepAnalysisRequest, PivotRequest, ScanCreate, ScanCreateSimple, ScanCreateV2, ScanCreateResponse, ScanDetailResponse, ScanJobResponse, ScanResponse, SetPrimaryDomainRequest, ShodanEnrichRequest, SubdomainEnrichRequest, TelegramMonitorRequest, ThreatIntelRequest
 from app.models.scan import Scan
 from app.models.scan_job import ScanJob
+from app.models.asset import Asset
 from app.core.auth import get_authenticated_user, can_read_scan, can_modify_scan
 from app.schemas.auth import AddScanCollaboratorRequest, ScanCollaboratorResponse, ScanPermissionResponse
 from app.workers.scan_tasks import execute_scan_task
@@ -427,6 +428,7 @@ async def get_scan(
         "id": db_scan.id,
         "target_domain": db_scan.target_domain,
         "target_type": db_scan.target_type,
+        "scan_mode": db_scan.scan_mode,
         "status": db_scan.status,
         "celery_task_id": db_scan.celery_task_id,
         "selected_vectors": db_scan.selected_vectors,
@@ -453,6 +455,27 @@ async def list_scan_jobs(
         .where(ScanJob.scan_id == scan_id)
         .order_by(ScanJob.created_at.desc())
         .limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+@router.get("/{scan_id}/assets", response_model=List[AssetResponse])
+async def list_scan_assets(
+    scan_id: str,
+    state: Optional[str] = Query(None, pattern="^(CANDIDATE|RESOLVED|LIVE)$"),
+    asset_type: Optional[str] = Query(None, max_length=32),
+    limit: int = Query(1000, ge=1, le=5000),
+    db: AsyncSession = Depends(get_db),
+    scan: Scan = Depends(can_read_scan()),
+):
+    """Return the canonical, lifecycle-aware asset inventory for a scan."""
+    stmt = select(Asset).where(Asset.scan_id == scan_id)
+    if state:
+        stmt = stmt.where(Asset.state == state)
+    if asset_type:
+        stmt = stmt.where(Asset.asset_type == asset_type.upper())
+    result = await db.execute(
+        stmt.order_by(Asset.state.desc(), Asset.canonical_value.asc()).limit(limit)
     )
     return list(result.scalars().all())
 

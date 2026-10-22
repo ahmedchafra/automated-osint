@@ -24,6 +24,13 @@ from app.database import AsyncSessionLocal
 from app.workers.task_utils import _run, persist_findings
 from app.models.scan import Scan
 from app.services.progress import ScanProgressPublisher
+from app.services.asset_service import registrable_domain, upsert_asset
+from app.services.dns_validation import detect_wildcard_dns, matches_wildcard
+from app.services.http_validation import (
+    HTTP_PROBE_CONCURRENCY,
+    MAX_HTTP_PROBES,
+    probe_http,
+)
 from app.config import settings
 
 logger = logging.getLogger("osint.initial_scan")
@@ -31,6 +38,17 @@ logger = logging.getLogger("osint.initial_scan")
 TOOL_WATCHDOG_SECONDS = 300
 ISOLATED_TOOLS = {"subfinder", "crtsh", "dns_resolver"}
 MAX_DISCOVERY_FINDINGS_PER_SOURCE = 1000
+
+
+def _bounded_dns_candidates(
+    root_domain: str, discovered: set[str], limit: int
+) -> list[str]:
+    """Select deterministic DNS candidates while always retaining the apex."""
+    ordered = sorted(
+        (hostname for hostname in discovered if hostname != root_domain),
+        key=lambda hostname: (hostname.count("."), len(hostname), hostname),
+    )
+    return [root_domain, *ordered[: max(0, limit - 1)]]
 
 
 def _valid_subdomain(value: str, root_domain: str) -> bool:
@@ -183,6 +201,7 @@ async def _run_tool(collector_name: str, target: str, scan_id: str,
 async def run_domain_scan(
     domain: str, scan_id: str, session, publisher,
     free_only: bool = True,
+    scan_mode: str = "validated",
 ) -> tuple[set, set, int]:
     """Run the 6-tool domain infrastructure scan on a target domain.
 
@@ -205,11 +224,41 @@ async def run_domain_scan(
     total_findings = 0
     all_subdomains: set[str] = set()
     resolved_ips: set[str] = set()
+    resolved_hosts: dict[str, list[str]] = {}
+
+    await upsert_asset(
+        session,
+        scan_id=scan_id,
+        asset_type="DOMAIN",
+        value=domain,
+        state="CANDIDATE",
+        source_module="scan_target",
+    )
+
+    async def record_candidates(findings: list[dict]) -> None:
+        for finding in findings:
+            if finding.get("entity_type") != "SUBDOMAIN":
+                continue
+            value = str(finding.get("entity_value", ""))
+            if not value:
+                continue
+            normalized = finding.setdefault("normalized_data", {})
+            normalized["asset_state"] = "CANDIDATE"
+            normalized["registrable_domain"] = registrable_domain(value)
+            await upsert_asset(
+                session,
+                scan_id=scan_id,
+                asset_type="DOMAIN" if value == domain else "SUBDOMAIN",
+                value=value,
+                state="CANDIDATE",
+                source_module=finding.get("source_module"),
+            )
 
     # 1a. crt.sh — SSL certificate transparency logs
     crtsh_findings = _filter_discovery_findings(
         await _run_tool("crtsh", domain, scan_id, session, publisher), domain
     )
+    await record_candidates(crtsh_findings)
     total_findings += await persist_findings(session, scan_id, crtsh_findings)
     for f in crtsh_findings:
         ev = f.get("entity_value", "")
@@ -220,6 +269,7 @@ async def run_domain_scan(
     subfinder_findings = _filter_discovery_findings(
         await _run_tool("subfinder", domain, scan_id, session, publisher), domain
     )
+    await record_candidates(subfinder_findings)
     total_findings += await persist_findings(session, scan_id, subfinder_findings)
     for f in subfinder_findings:
         ev = f.get("entity_value", "")
@@ -234,6 +284,7 @@ async def run_domain_scan(
         ),
         domain,
     )
+    await record_candidates(theharvester_findings)
     total_findings += await persist_findings(session, scan_id, theharvester_findings)
     for f in theharvester_findings:
         etype = f.get("entity_type", "")
@@ -244,11 +295,32 @@ async def run_domain_scan(
         # those as evidence, but do not fan out into network enrichment until
         # our own DNS resolver verifies an association with this target.
 
-    # 1d. DNS resolution (bounded to 200 subdomains)
+    if scan_mode == "passive":
+        await publisher.publish(scan_id, "validation_skipped", {
+            "reason": "passive_mode",
+            "candidates": len(all_subdomains) + 1,
+        })
+        whois_findings = await _run_tool(
+            "whois_lookup", domain, scan_id, session, publisher
+        )
+        total_findings += await persist_findings(
+            session, scan_id, whois_findings
+        )
+        return all_subdomains, resolved_ips, total_findings
+
+    # 1d. Detect wildcard DNS before resolving the bounded candidate set.
+    wildcard = await detect_wildcard_dns(domain)
+    await publisher.publish(scan_id, "wildcard_dns_checked", {
+        "domain": domain,
+        "detected": wildcard.detected,
+        "responsive_samples": wildcard.responsive_samples,
+    })
+
+    # Resolve candidates (bounded to 200 subdomains).
     from app.services.vectors.infrastructure import MAX_DNS_SUBDOMAINS, DNS_CONCURRENCY
-    subdomains_to_resolve = {domain} | all_subdomains
-    if len(subdomains_to_resolve) > MAX_DNS_SUBDOMAINS:
-        subdomains_to_resolve = set(list(subdomains_to_resolve)[:MAX_DNS_SUBDOMAINS])
+    subdomains_to_resolve = _bounded_dns_candidates(
+        domain, all_subdomains, MAX_DNS_SUBDOMAINS
+    )
 
     dns_findings_all = []
     semaphore = asyncio.Semaphore(DNS_CONCURRENCY)
@@ -257,17 +329,116 @@ async def run_domain_scan(
         async with semaphore:
             return await _run_tool("dns_resolver", subdomain, scan_id, session, publisher)
 
-    dns_tasks = [asyncio.create_task(resolve_one(s)) for s in sorted(subdomains_to_resolve)]
+    dns_tasks = [asyncio.create_task(resolve_one(s)) for s in subdomains_to_resolve]
     dns_results = await asyncio.gather(*dns_tasks, return_exceptions=True)
     for result in dns_results:
         if isinstance(result, list):
             dns_findings_all.extend(result)
 
-    total_findings += await persist_findings(session, scan_id, dns_findings_all)
     for f in dns_findings_all:
-        for ip in (f.get("normalized_data", {}) or {}).get("resolved_ips", []):
+        hostname = str(f.get("entity_value", ""))
+        normalized = f.setdefault("normalized_data", {})
+        wildcard_suspected = hostname != domain and matches_wildcard(f, wildcard)
+        normalized["asset_state"] = "CANDIDATE" if wildcard_suspected else "RESOLVED"
+        normalized["wildcard_suspected"] = wildcard_suspected
+        normalized["registrable_domain"] = registrable_domain(hostname)
+        ips = normalized.get("resolved_ips", [])
+        await upsert_asset(
+            session,
+            scan_id=scan_id,
+            asset_type="DOMAIN" if hostname == domain else "SUBDOMAIN",
+            value=hostname,
+            state="CANDIDATE" if wildcard_suspected else "RESOLVED",
+            source_module="dns_resolver",
+            wildcard_suspected=wildcard_suspected,
+            dns_records=normalized.get("dns_records", {}),
+            resolved_ips=ips,
+        )
+        if wildcard_suspected:
+            continue
+        public_ips = [ip for ip in ips if _public_ip(ip)]
+        if public_ips:
+            resolved_hosts[hostname] = public_ips
+        for ip in ips:
             if _public_ip(ip):
                 resolved_ips.add(ip)
+                await upsert_asset(
+                    session,
+                    scan_id=scan_id,
+                    asset_type="IP_ADDRESS",
+                    value=ip,
+                    state="RESOLVED",
+                    source_module="dns_resolver",
+                )
+
+    total_findings += await persist_findings(session, scan_id, dns_findings_all)
+
+    # Low-impact HTTP validation for clean, publicly resolved hosts.
+    hosts_to_probe = sorted(resolved_hosts)[:MAX_HTTP_PROBES]
+    probe_semaphore = asyncio.Semaphore(HTTP_PROBE_CONCURRENCY)
+    await publisher.publish(scan_id, "http_validation_started", {
+        "hosts": len(hosts_to_probe),
+        "limit": MAX_HTTP_PROBES,
+    })
+
+    async def probe_one(hostname: str):
+        async with probe_semaphore:
+            return hostname, await probe_http(
+                hostname, resolved_hosts[hostname]
+            )
+
+    probe_results = await asyncio.gather(
+        *(probe_one(hostname) for hostname in hosts_to_probe),
+        return_exceptions=True,
+    )
+    live_findings: list[dict] = []
+    for result in probe_results:
+        if isinstance(result, Exception):
+            logger.debug("HTTP validation failed: %s", result)
+            continue
+        hostname, metadata = result
+        if not metadata:
+            continue
+        await upsert_asset(
+            session,
+            scan_id=scan_id,
+            asset_type="DOMAIN" if hostname == domain else "SUBDOMAIN",
+            value=hostname,
+            state="LIVE",
+            source_module="http_probe",
+            http_metadata=metadata,
+        )
+        await upsert_asset(
+            session,
+            scan_id=scan_id,
+            asset_type="URL",
+            value=metadata["url"],
+            state="LIVE",
+            source_module="http_probe",
+            http_metadata=metadata,
+        )
+        live_findings.append({
+            "vector_type": "INFRASTRUCTURE",
+            "entity_type": "URL",
+            "entity_value": metadata["url"],
+            "severity": "INFO",
+            "confidence": 1.0,
+            "source_module": "http_probe",
+            "raw_data": metadata,
+            "normalized_data": {
+                **metadata,
+                "hostname": hostname,
+                "asset_state": "LIVE",
+            },
+            "tags": ["live", "http-validated"],
+        })
+    total_findings += await persist_findings(
+        session, scan_id, live_findings
+    )
+    await publisher.publish(scan_id, "http_validation_completed", {
+        "probed": len(hosts_to_probe),
+        "live": len(live_findings),
+    })
 
     # 1e. Shodan InternetDB — free port/service lookup per IP
     for ip in sorted(resolved_ips):
@@ -297,20 +468,29 @@ async def _run_pipeline(scan_id: str) -> dict:
 
         await publisher.publish(scan_id, "scan_started", {
             "target_domain": scan.target_domain,
+            "scan_mode": scan.scan_mode,
             "phases": ["INFRASTRUCTURE"],
         })
 
         total_findings = 0
 
         try:
+            phase_tools = ["crtsh", "subfinder", "theharvester"]
+            if scan.scan_mode != "passive":
+                phase_tools.extend([
+                    "wildcard_dns", "dns_resolver", "http_probe",
+                    "shodan_internetdb",
+                ])
+            phase_tools.append("whois_lookup")
             await publisher.publish(scan_id, "phase_started", {
                 "phase": "INFRASTRUCTURE",
                 "phase_index": 1,
-                "tools": ["crtsh", "subfinder", "theharvester", "dns_resolver", "shodan_internetdb", "whois_lookup"],
+                "tools": phase_tools,
             })
 
             all_subdomains, resolved_ips, tool_findings = await run_domain_scan(
                 scan.target_domain, scan_id, session, publisher, free_only=True,
+                scan_mode=scan.scan_mode,
             )
             total_findings += tool_findings
 

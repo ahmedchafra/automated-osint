@@ -6,6 +6,7 @@ from app.models.entity_link import EntityLink
 from app.models.ai_query import AIQuery
 from app.models.scan_collaborator import ScanCollaborator
 from app.models.scan_job import ScanJob
+from app.models.asset import Asset
 
 # Explicitly import all models to ensure they are registered with Base.metadata
 __all__ = [
@@ -18,5 +19,6 @@ __all__ = [
     "AIQuery",
     "ScanCollaborator",
     "ScanJob",
+    "Asset",
 ]
 

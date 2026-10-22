@@ -120,6 +120,17 @@ async def _run_ip_pipeline(scan_id: str) -> dict:
         thread_pool = ThreadPoolExecutor(max_workers=4)
 
         try:
+            from app.services.asset_service import registrable_domain, upsert_asset
+
+            await upsert_asset(
+                session,
+                scan_id=scan_id,
+                asset_type="IP_ADDRESS",
+                value=target_ip,
+                state="RESOLVED",
+                source_module="scan_target",
+            )
+
             # ─── PHASE 1: REVERSE DNS ──────────────────────────────────────
             await publisher.publish(scan_id, "phase_started", {
                 "phase": "INFRASTRUCTURE",
@@ -129,6 +140,21 @@ async def _run_ip_pipeline(scan_id: str) -> dict:
 
             # 1a. Reverse DNS — IP → domain names
             rdns_findings = await _run_tool("reverse_dns", target_ip, scan_id, session, publisher, thread_pool)
+            for finding in rdns_findings:
+                value = str(finding.get("entity_value", ""))
+                if not value:
+                    continue
+                normalized = finding.setdefault("normalized_data", {})
+                normalized["asset_state"] = "CANDIDATE"
+                normalized["registrable_domain"] = registrable_domain(value)
+                await upsert_asset(
+                    session,
+                    scan_id=scan_id,
+                    asset_type="DOMAIN",
+                    value=value,
+                    state="CANDIDATE",
+                    source_module="reverse_dns",
+                )
             total_findings += await persist_findings(session, scan_id, rdns_findings)
             for f in rdns_findings:
                 ev = f.get("entity_value", "")
@@ -234,6 +260,7 @@ async def _run_ip_pipeline(scan_id: str) -> dict:
                 for domain in sorted(discovered_domains):
                     subs, ips, tool_findings = await run_domain_scan(
                         domain, scan_id, session, publisher, free_only=True,
+                        scan_mode=scan.scan_mode,
                     )
                     total_findings += tool_findings
 

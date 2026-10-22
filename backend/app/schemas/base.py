@@ -257,6 +257,26 @@ class ScanJobResponse(SchemaBase):
     updated_at: datetime
 
 
+class AssetResponse(SchemaBase):
+    id: str
+    scan_id: str
+    asset_type: str
+    value: str
+    canonical_value: str
+    registrable_domain: Optional[str] = None
+    state: str
+    in_scope: bool
+    wildcard_suspected: bool
+    source_modules: List[str] = Field(default_factory=list)
+    evidence_count: int
+    dns_records: Dict[str, Any] = Field(default_factory=dict)
+    resolved_ips: List[str] = Field(default_factory=list)
+    http_metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    last_observed_at: datetime
+    updated_at: datetime
+
+
 class ScanDetailResponse(ScanResponse):
     findings: List["FindingResponse"] = Field(default_factory=list)
 

@@ -14,7 +14,7 @@ import { useScanWorkspace } from '../context/ScanWorkspaceContext';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import type { ScanEvent } from '../api/ws';
-import type { ScanJob, TabId, ScanWorkspaceState, ScanWorkspaceAction } from '../context/ScanWorkspaceContext';
+import type { AssetRecord, ScanJob, TabId, ScanWorkspaceState, ScanWorkspaceAction } from '../context/ScanWorkspaceContext';
 import ErrorBoundary from '../components/ErrorBoundary';
 import { InfrastructureTab } from '../components/workspace/InfrastructureTab';
 import { IdentityTab } from '../components/workspace/IdentityTab';
@@ -580,6 +580,13 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
     },
   });
 
+  const { data: assets = [] } = useQuery<AssetRecord[]>({
+    queryKey: ['scanAssets', scanId],
+    queryFn: async () => (await apiClient.get(`/scans/${scanId}/assets`)).data,
+    enabled: !!scanId,
+    refetchInterval: jobs.some(job => ACTIVE_JOB_STATUSES.has(job.status)) ? 4_000 : false,
+  });
+
   // Permission check
   const { user } = useAuth();
   const { data: permissionData } = useQuery({
@@ -605,6 +612,10 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
     }
   }, [findingsResponse, dispatch]);
 
+  useEffect(() => {
+    dispatch({ type: 'ASSETS_UPDATED', assets });
+  }, [assets, dispatch]);
+
   const seenTerminalJobs = useRef<Set<string> | null>(null);
   useEffect(() => {
     dispatch({ type: 'JOBS_UPDATED', jobs });
@@ -621,6 +632,7 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
     if (hasNewTerminalJob) {
       queryClient.invalidateQueries({ queryKey: ['scanFindings', scanId] });
       queryClient.invalidateQueries({ queryKey: ['scanWorkspace', scanId] });
+      queryClient.invalidateQueries({ queryKey: ['scanAssets', scanId] });
     }
   }, [jobs, scanId, dispatch, queryClient]);
 
@@ -655,6 +667,10 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
         // A tool completed during deep analysis — refetch findings immediately
         case 'tool_completed':
           queryClient.invalidateQueries({ queryKey: ['scanFindings', scanId] });
+          break;
+        case 'http_validation_completed':
+        case 'wildcard_dns_checked':
+          queryClient.invalidateQueries({ queryKey: ['scanAssets', scanId] });
           break;
         // Scan health — refresh scan status so the tab knows it finished
         case 'scan_completed':

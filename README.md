@@ -131,6 +131,18 @@ Click **"New Scan"**, choose a target type:
 🏢 Acme Inc     →  Org discovery → domain pipeline
 ```
 
+Choose an interaction mode before launching:
+
+| Mode | Behavior |
+|---|---|
+| **Passive** | Third-party/public datasets only; discovered hosts remain candidates. |
+| **Validated** | Adds wildcard-aware DNS resolution and bounded HTTP `HEAD` liveness checks. This is the default. |
+| **Active** | Authorizes direct checks and future active modules; currently includes the validated pipeline. |
+
+Domain assets now move through a durable lifecycle: `CANDIDATE` (discovered),
+`RESOLVED` (public DNS evidence), and `LIVE` (HTTP response observed). Wildcard
+DNS matches remain visible as evidence but are excluded from IP/service fan-out.
+
 ### 3. Explore Results
 
 The scan workspace has tabbed views:

@@ -155,3 +155,27 @@ async def update_job_status(
         if scan is not None:
             scan.updated_at = now
         await db.commit()
+
+
+async def update_job_progress(
+    celery_task_id: str,
+    event: str,
+    payload: dict[str, Any],
+) -> None:
+    """Persist the latest pipeline event for refresh/reconnect recovery."""
+    async with database.AsyncSessionLocal() as db:
+        job = (
+            await db.execute(
+                select(ScanJob).where(ScanJob.celery_task_id == celery_task_id)
+            )
+        ).scalar_one_or_none()
+        if job is None or job.status in TERMINAL_JOB_STATUSES:
+            return
+
+        safe_payload = _result_summary(payload)
+        job.progress = {
+            "event": event,
+            "payload": safe_payload,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await db.commit()

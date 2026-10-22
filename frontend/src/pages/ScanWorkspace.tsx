@@ -98,6 +98,12 @@ function JobActivityPanel({ jobs }: { jobs: ScanJob[] }) {
       {visibleJobs.map(job => {
         const active = ACTIVE_JOB_STATUSES.has(job.status);
         const failed = job.status === 'FAILED';
+        const progressPayload = job.progress?.payload;
+        const progressLabel = typeof progressPayload?.phase === 'string'
+          ? progressPayload.phase
+          : typeof progressPayload?.tool === 'string'
+            ? progressPayload.tool
+            : job.progress?.event?.replaceAll('_', ' ');
         return (
           <div key={job.id} style={{
             padding: '7px 14px', display: 'flex', alignItems: 'center', gap: 8,
@@ -115,6 +121,11 @@ function JobActivityPanel({ jobs }: { jobs: ScanJob[] }) {
                 overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 280,
               }}>
                 {job.input_value}
+              </span>
+            )}
+            {progressLabel && active && (
+              <span style={{ color: 'var(--accent)', fontSize: 10 }}>
+                {progressLabel}
               </span>
             )}
             <span style={{ marginLeft: 'auto', color: failed ? '#ef4444' : 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>

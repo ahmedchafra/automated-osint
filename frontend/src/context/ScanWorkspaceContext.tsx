@@ -36,6 +36,12 @@ export interface ScanJob {
   status: 'QUEUED' | 'RUNNING' | 'RETRYING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
   input_type?: string | null;
   input_value?: string | null;
+  progress: {
+    event?: string;
+    payload?: Record<string, unknown>;
+    updated_at?: string;
+  };
+  result_summary: Record<string, unknown>;
   error?: string | null;
   created_at: string;
   started_at?: string | null;

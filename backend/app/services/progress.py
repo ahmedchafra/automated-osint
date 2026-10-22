@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
 import redis.asyncio as aioredis
+from celery import current_task
 
 from app.config import settings
 
@@ -71,6 +72,18 @@ class ScanProgressPublisher:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             **payload,
         }
+        task_id = getattr(getattr(current_task, "request", None), "id", None)
+        if task_id:
+            try:
+                from app.services.job_service import update_job_progress
+
+                await update_job_progress(str(task_id), event, payload)
+            except Exception:
+                logger.exception(
+                    "failed to persist progress event %s for task %s",
+                    event,
+                    task_id,
+                )
         try:
             async with _redis_client() as client:
                 await client.publish(f"scan:{scan_id}", json.dumps(message))

@@ -131,6 +131,51 @@ def test_cancel_scan_revokes_exact_task(monkeypatch, client):
     assert detail["status"] == "CANCELLED"
 
 
+def test_active_validation_is_mode_gated_and_deduplicated(monkeypatch, client):
+    headers = {"X-API-Key": API_KEY}
+    validated = client.post(
+        "/api/scans",
+        headers=headers,
+        json={
+            "target_domain": "example.com",
+            "scan_mode": "validated",
+            "selected_vectors": ["INFRASTRUCTURE"],
+            "target_usernames": [],
+        },
+    ).json()["scan"]
+    rejected = client.post(
+        f"/api/scans/{validated['id']}/active-validation", headers=headers
+    )
+    assert rejected.status_code == 409
+
+    active = client.post(
+        "/api/scans",
+        headers=headers,
+        json={
+            "target_domain": "authorized.example",
+            "scan_mode": "active",
+            "selected_vectors": ["INFRASTRUCTURE"],
+            "target_usernames": [],
+        },
+    ).json()["scan"]
+
+    from app.workers.active_validation import active_validation_task
+
+    monkeypatch.setattr(
+        active_validation_task,
+        "apply_async",
+        lambda *, args, kwargs, task_id: SimpleNamespace(id=task_id),
+    )
+    started = client.post(
+        f"/api/scans/{active['id']}/active-validation", headers=headers
+    )
+    assert started.status_code == 202
+    duplicate = client.post(
+        f"/api/scans/{active['id']}/active-validation", headers=headers
+    )
+    assert duplicate.status_code == 409
+
+
 def test_cancel_completed_scan_revokes_active_child_job(monkeypatch, client):
     import asyncio
     from datetime import datetime, timezone

@@ -36,6 +36,7 @@ from app.workers.telegram_task import telegram_monitor_task
 from app.workers.ahmia_task import ahmia_search_task
 from app.workers.ip_scan import execute_ip_scan_task
 from app.workers.org_scan import execute_org_scan_task, execute_org_infra_task
+from app.workers.active_validation import active_validation_task
 from app.services.job_service import dispatch_scan_job
 
 logger = logging.getLogger("osint.api.scans")
@@ -600,6 +601,44 @@ async def trigger_domain_deep_analysis(
         "domain": body.domain,
         "theharvester_mode": body.theharvester_mode,
     }
+
+
+@router.post("/{scan_id}/active-validation", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_active_validation(
+    scan_id: str,
+    db: AsyncSession = Depends(get_db),
+    scan: Scan = Depends(can_modify_scan()),
+):
+    """Run Naabu -> Nmap and Nuclei against verified assets in Active mode."""
+    if scan.scan_mode != "active":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Active validation requires a scan created in Active mode",
+        )
+
+    existing = await db.execute(
+        select(ScanJob).where(
+            ScanJob.scan_id == scan_id,
+            ScanJob.job_type == "active_validation",
+            ScanJob.status.in_(("QUEUED", "RUNNING", "RETRYING")),
+        )
+    )
+    if existing.scalars().first():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Active validation is already running for this scan",
+        )
+
+    job = await dispatch_scan_job(
+        db,
+        active_validation_task,
+        scan_id,
+        job_type="active_validation",
+        stage="active_validation",
+        input_type="verified_assets",
+        input_value="canonical asset inventory",
+    )
+    return {"task_id": job.celery_task_id, "scan_id": scan_id}
 
 
 @router.post("/{scan_id}/secrets-scan", status_code=status.HTTP_202_ACCEPTED)

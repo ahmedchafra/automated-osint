@@ -27,6 +27,19 @@ if ! command -v h8mail >/dev/null 2>&1; then
 fi
 
 # ── theHarvester API keys ─────────────────────────────────────────────────
+# Active validation is opt-in at the scan and API layers, but fail visibly at
+# startup if its image-baked executables are absent.
+for active_tool in naabu nmap nuclei; do
+    if command -v "$active_tool" >/dev/null 2>&1; then
+        echo "[entrypoint] Active scanner available: $active_tool"
+    else
+        echo "[entrypoint] WARNING: $active_tool not found; active validation will fail"
+    fi
+done
+if [ ! -d /opt/nuclei-templates ]; then
+    echo "[entrypoint] WARNING: pinned Nuclei templates not found"
+fi
+
 # Generate ~/.theHarvester/api-keys.yaml from .env vars so API-key-gated
 # sources are available. Only writes non-empty env vars.
 if command -v theHarvester >/dev/null 2>&1; then

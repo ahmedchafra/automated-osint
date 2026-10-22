@@ -55,6 +55,7 @@ class EntityType(str, Enum):
     HTTP_HEADER = "HTTP_HEADER"
     HISTORICAL_URL = "HISTORICAL_URL"
     WAYBACK_SNAPSHOT = "WAYBACK_SNAPSHOT"
+    VULNERABILITY = "VULNERABILITY"
 
 
 class Severity(str, Enum):

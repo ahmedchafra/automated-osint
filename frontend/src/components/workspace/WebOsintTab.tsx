@@ -9,6 +9,7 @@ export function WebOsintTab() {
     httpHeaders: false,
     historicalUrls: false,
     cves: true,
+    vulnerabilities: true,
   });
 
   // ── Web recon findings ───────────────────────────────────────────────
@@ -18,6 +19,7 @@ export function WebOsintTab() {
   const waybackSnapshots = state.findings.filter(f => f.entity_type === 'WAYBACK_SNAPSHOT');
   const cves = state.findings.filter(f => f.entity_type === 'CVE' && f.source_module === 'technology_cve');
   const versionFindings = state.findings.filter(f => f.entity_type === 'TECHNOLOGY_VERSION');
+  const vulnerabilities = state.findings.filter(f => f.entity_type === 'VULNERABILITY');
 
   // Build a tech_name → version map from version_detector findings
   const versionMap = new Map<string, string>();
@@ -28,7 +30,7 @@ export function WebOsintTab() {
     if (tech && ver) versionMap.set(tech.toLowerCase(), ver);
   });
 
-  const total = technologies.length + httpHeaders.length + historicalUrls.length + waybackSnapshots.length + cves.length;
+  const total = technologies.length + httpHeaders.length + historicalUrls.length + waybackSnapshots.length + cves.length + vulnerabilities.length;
 
   if (total === 0) {
     return (
@@ -59,6 +61,7 @@ export function WebOsintTab() {
         <SummaryBadge icon={<Code size={13} />} label="HTTP Headers" count={httpHeaders.length} color="#3b82f6" />
         <SummaryBadge icon={<History size={13} />} label="Historical URLs" count={historicalUrls.length + waybackSnapshots.length} color="#f59e0b" />
         <SummaryBadge icon={<AlertTriangle size={13} />} label="Technology CVEs" count={cves.length} color="#ef4444" />
+        <SummaryBadge icon={<AlertTriangle size={13} />} label="Active Findings" count={vulnerabilities.length} color="#f97316" />
         {versionMap.size > 0 && (
           <SummaryBadge icon={<Server size={13} />} label="Versions Detected" count={versionMap.size} color="#22c55e" />
         )}
@@ -120,6 +123,54 @@ export function WebOsintTab() {
       </Section>
 
       {/* ── HTTP Headers ─────────────────────────────────────────────── */}
+      <Section
+        title="Active Validation Findings (Nuclei)"
+        count={vulnerabilities.length}
+        icon={<AlertTriangle size={14} style={{ color: '#f97316' }} />}
+        expanded={expandedSections.vulnerabilities}
+        onToggle={() => toggleSection('vulnerabilities')}
+      >
+        {vulnerabilities.length > 0 ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {vulnerabilities.map((finding, i) => {
+              const nd = finding.normalized_data || {};
+              const sev = finding.severity || 'INFO';
+              return (
+                <div key={finding.id || i} style={{
+                  padding: '8px 10px', borderRadius: 6,
+                  background: 'var(--bg-primary)', border: '1px solid var(--border)',
+                  fontSize: 10,
+                }}>
+                  <div className="flex items-center gap-2" style={{ marginBottom: 4 }}>
+                    <span className={`badge badge-${sev === 'CRITICAL' || sev === 'HIGH' ? 'danger' : sev === 'MEDIUM' ? 'warning' : 'info'}`}>
+                      {sev}
+                    </span>
+                    <strong style={{ color: 'var(--text-strong)' }}>{String(nd.name || nd.template_id || finding.entity_value)}</strong>
+                  </div>
+                  <div style={{ color: 'var(--accent)', fontFamily: 'var(--font-mono)', wordBreak: 'break-all' }}>
+                    {String(nd.matched_at || finding.entity_value)}
+                  </div>
+                  {nd.description != null && (
+                    <div style={{ color: 'var(--text-muted)', marginTop: 4, lineHeight: 1.4 }}>
+                      {String(nd.description).slice(0, 500)}
+                    </div>
+                  )}
+                  {Array.isArray(nd.cve_ids) && nd.cve_ids.length > 0 && (
+                    <div style={{ color: '#ef4444', marginTop: 4, fontFamily: 'var(--font-mono)' }}>
+                      {nd.cve_ids.join(', ')}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '8px 0' }}>
+            No Nuclei findings. This stage is available only from scans created in Active mode.
+          </div>
+        )}
+      </Section>
+
       <Section
         title="HTTP Response Headers"
         count={httpHeaders.length}

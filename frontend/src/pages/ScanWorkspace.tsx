@@ -73,6 +73,7 @@ const JOB_LABELS: Record<string, string> = {
   ahmia_search: 'Dark-web search',
   telegram_monitor: 'Telegram monitor',
   run_ai_dork_task: 'AI search',
+  active_validation: 'Active validation',
 };
 
 function JobActivityPanel({ jobs }: { jobs: ScanJob[] }) {
@@ -165,7 +166,7 @@ const TABS: TabConfig[] = [
     id: 'web-osint',
     label: 'Web OSINT',
     icon: Globe,
-    entityTypes: ['TECHNOLOGY', 'HTTP_HEADER', 'HISTORICAL_URL', 'WAYBACK_SNAPSHOT', 'CVE'],
+    entityTypes: ['TECHNOLOGY', 'HTTP_HEADER', 'HISTORICAL_URL', 'WAYBACK_SNAPSHOT', 'CVE', 'VULNERABILITY'],
   },
   {
     id: 'secrets',
@@ -672,6 +673,10 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
         case 'wildcard_dns_checked':
           queryClient.invalidateQueries({ queryKey: ['scanAssets', scanId] });
           break;
+        case 'active_validation_completed':
+          queryClient.invalidateQueries({ queryKey: ['scanFindings', scanId] });
+          queryClient.invalidateQueries({ queryKey: ['scanJobs', scanId] });
+          break;
         // Scan health — refresh scan status so the tab knows it finished
         case 'scan_completed':
         case 'scan_failed':
@@ -681,10 +686,14 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
         // Deep analysis started event — currently InfrastructureTab dispatches
         // this locally; handle it in WS too so other consumers can react.
         case 'domain_deep_analysis_started': {
-          const payload = event.payload as { domain?: string } | undefined;
+          const payload = event.payload as { domain?: string; collectors?: string[] } | undefined;
+          const collectors = Array.isArray(event.collectors)
+            ? event.collectors.map(String)
+            : payload?.collectors;
           dispatch({
             type: 'DOMAIN_DEEP_ANALYSIS_STARTED',
             domain: String(event.domain || payload?.domain || ''),
+            collectors,
           });
           break;
         }

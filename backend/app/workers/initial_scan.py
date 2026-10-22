@@ -38,6 +38,8 @@ logger = logging.getLogger("osint.initial_scan")
 TOOL_WATCHDOG_SECONDS = 300
 ISOLATED_TOOLS = {"subfinder", "crtsh", "dns_resolver"}
 MAX_DISCOVERY_FINDINGS_PER_SOURCE = 1000
+MAX_WEB_SURFACE_TARGETS = 25
+WEB_SURFACE_CONCURRENCY = 5
 
 
 def _bounded_dns_candidates(
@@ -306,6 +308,12 @@ async def run_domain_scan(
         total_findings += await persist_findings(
             session, scan_id, whois_findings
         )
+        wayback_findings = await _run_tool(
+            "wayback_machine", domain, scan_id, session, publisher
+        )
+        total_findings += await persist_findings(
+            session, scan_id, wayback_findings
+        )
         return all_subdomains, resolved_ips, total_findings
 
     # 1d. Detect wildcard DNS before resolving the bounded candidate set.
@@ -440,6 +448,45 @@ async def run_domain_scan(
         "live": len(live_findings),
     })
 
+    # Enrich only URLs that passed DNS and HTTP validation. This keeps the
+    # web-surface fan-out disconnected from unverified discovery candidates.
+    live_urls = [
+        finding["entity_value"]
+        for finding in live_findings[:MAX_WEB_SURFACE_TARGETS]
+    ]
+    surface_semaphore = asyncio.Semaphore(WEB_SURFACE_CONCURRENCY)
+
+    async def inspect_surface(url: str):
+        async with surface_semaphore:
+            return await _run_tool(
+                "web_surface", url, scan_id, session, publisher
+            )
+
+    surface_results = await asyncio.gather(
+        *(inspect_surface(url) for url in live_urls),
+        return_exceptions=True,
+    )
+    surface_findings: list[dict] = []
+    for result in surface_results:
+        if isinstance(result, list):
+            surface_findings.extend(result)
+    total_findings += await persist_findings(
+        session, scan_id, surface_findings
+    )
+    await publisher.publish(scan_id, "web_surface_completed", {
+        "origins": len(live_urls),
+        "findings": len(surface_findings),
+    })
+
+    # Wayback is third-party/passive and runs once for the root domain rather
+    # than once per live subdomain.
+    wayback_findings = await _run_tool(
+        "wayback_machine", domain, scan_id, session, publisher
+    )
+    total_findings += await persist_findings(
+        session, scan_id, wayback_findings
+    )
+
     # 1e. Shodan InternetDB — free port/service lookup per IP
     for ip in sorted(resolved_ips):
         shodan_findings = await _run_tool("shodan_internetdb", ip, scan_id, session, publisher)
@@ -479,9 +526,9 @@ async def _run_pipeline(scan_id: str) -> dict:
             if scan.scan_mode != "passive":
                 phase_tools.extend([
                     "wildcard_dns", "dns_resolver", "http_probe",
-                    "shodan_internetdb",
+                    "web_surface", "shodan_internetdb",
                 ])
-            phase_tools.append("whois_lookup")
+            phase_tools.extend(["wayback_machine", "whois_lookup"])
             await publisher.publish(scan_id, "phase_started", {
                 "phase": "INFRASTRUCTURE",
                 "phase_index": 1,

@@ -39,6 +39,7 @@ from app.config import settings
 from app.workers.celery_app import celery_app
 from app.database import AsyncSessionLocal
 from app.models.finding import Finding
+from app.models.asset import Asset
 from app.models.scan import Scan
 from app.services.progress import ScanProgressPublisher
 from app.workers.task_utils import run_collector_for_scan, _run
@@ -86,6 +87,24 @@ def _has_theharvester_api_keys() -> bool:
     )
 
 
+def _collector_specs(scan_mode: str, has_verified_asset: bool) -> list[tuple[str, dict | None]]:
+    """Return the mode/scope-aware collector DAG for a domain pivot."""
+    specs: list[tuple[str, dict | None]] = [
+        ("hunter_domain", None),
+        ("theharvester", None),
+        ("github_secrets", None),
+        ("builtwith", None),
+        ("wayback_machine", None),
+    ]
+    if scan_mode != "passive":
+        specs.append(("dnstwist", None))
+        if has_verified_asset:
+            specs.append(("web_surface", None))
+    if scan_mode == "active" and has_verified_asset:
+        specs.append(("version_detector", None))
+    return specs
+
+
 @celery_app.task(name="domain_deep_analysis", bind=True, max_retries=1, default_retry_delay=10)
 def domain_deep_analysis_task(self, scan_id: str, domain: str,
                                theharvester_mode: str = "auto"):
@@ -106,13 +125,24 @@ def domain_deep_analysis_task(self, scan_id: str, domain: str,
                 raise ValueError(f"Scan {scan_id} not found")
 
             publisher = ScanProgressPublisher()
+            verified_asset = (
+                await session.execute(
+                    select(Asset).where(
+                        Asset.scan_id == scan_id,
+                        Asset.asset_type.in_(("DOMAIN", "SUBDOMAIN")),
+                        Asset.canonical_value == domain.lower().rstrip("."),
+                        Asset.state.in_(("RESOLVED", "LIVE")),
+                        Asset.in_scope.is_(True),
+                        Asset.wildcard_suspected.is_(False),
+                    )
+                )
+            ).scalars().first()
+            collector_specs = _collector_specs(scan.scan_mode, bool(verified_asset))
             await publisher.publish(scan_id, "domain_deep_analysis_started", {
                 "domain": domain,
+                "scan_mode": scan.scan_mode,
                 "theharvester_mode": theharvester_mode,
-                "collectors": [
-                    "hunter_domain", "theharvester", "github_secrets", "dnstwist",
-                    "builtwith", "http_headers", "wayback_machine", "version_detector",
-                ],
+                "collectors": [name for name, _ in collector_specs],
             })
 
             # Choose theHarvester kwargs based on mode.
@@ -121,6 +151,10 @@ def domain_deep_analysis_task(self, scan_id: str, domain: str,
                 theharvester_kwargs = {"free_only": False, "timeout": 900, "limit": 50000}
             else:
                 theharvester_kwargs = {"free_only": True, "timeout": 300, "limit": 500}
+            collector_specs = [
+                (name, theharvester_kwargs if name == "theharvester" else kwargs)
+                for name, kwargs in collector_specs
+            ]
 
             # Run all collectors in parallel with per-collector progress events
             async def run_collector_safe(name: str, target: str,
@@ -152,20 +186,14 @@ def domain_deep_analysis_task(self, scan_id: str, domain: str,
                     })
                     return 0
 
-            results = await asyncio.gather(
-                run_collector_safe("hunter_domain", domain),
-                run_collector_safe("theharvester", domain,
-                                   collector_kwargs=theharvester_kwargs),
-                run_collector_safe("github_secrets", domain),
-                run_collector_safe("dnstwist", domain),
-                run_collector_safe("builtwith", domain),
-                run_collector_safe("http_headers", domain),
-                run_collector_safe("wayback_machine", domain),
-                run_collector_safe("version_detector", domain),
-            )
-
-            email_count, theharvester_count, secrets_count, lookalikes_count, \
-                builtwith_count, http_count, wayback_count, version_count = results
+            results = await asyncio.gather(*(
+                run_collector_safe(name, domain, collector_kwargs=kwargs)
+                for name, kwargs in collector_specs
+            ))
+            collector_counts = {
+                name: count
+                for (name, _), count in zip(collector_specs, results)
+            }
 
             # End the orchestration transaction opened when the scan was read
             # so subsequent statements see all collector-session commits.
@@ -253,39 +281,28 @@ def domain_deep_analysis_task(self, scan_id: str, domain: str,
                         "error": str(e),
                     })
 
-            total = (email_count + theharvester_count + secrets_count
-                     + lookalikes_count + builtwith_count + http_count
-                     + wayback_count + version_count + cve_count)
+            total = sum(collector_counts.values()) + cve_count
 
             await session.commit()
-            await publisher.publish(scan_id, "domain_deep_analysis_completed", {
+            completion = {
                 "domain": domain,
+                "scan_mode": scan.scan_mode,
                 "theharvester_mode": theharvester_mode,
-                "emails": email_count,
-                "theharvester": theharvester_count,
-                "secrets": secrets_count,
-                "lookalikes": lookalikes_count,
-                "builtwith": builtwith_count,
-                "http_headers": http_count,
-                "wayback_urls": wayback_count,
-                "versions_detected": version_count,
+                "emails": collector_counts.get("hunter_domain", 0),
+                "theharvester": collector_counts.get("theharvester", 0),
+                "secrets": collector_counts.get("github_secrets", 0),
+                "lookalikes": collector_counts.get("dnstwist", 0),
+                "builtwith": collector_counts.get("builtwith", 0),
+                "web_surface": collector_counts.get("web_surface", 0),
+                "wayback_urls": collector_counts.get("wayback_machine", 0),
+                "versions_detected": collector_counts.get("version_detector", 0),
                 "technology_cves": cve_count,
                 "total_findings": total,
-            })
+            }
+            await publisher.publish(scan_id, "domain_deep_analysis_completed", completion)
             return {
                 "scan_id": scan_id,
-                "domain": domain,
-                "theharvester_mode": theharvester_mode,
-                "emails": email_count,
-                "theharvester": theharvester_count,
-                "secrets": secrets_count,
-                "lookalikes": lookalikes_count,
-                "builtwith": builtwith_count,
-                "http_headers": http_count,
-                "wayback_urls": wayback_count,
-                "versions_detected": version_count,
-                "technology_cves": cve_count,
-                "total_findings": total,
+                **completion,
             }
 
     try:

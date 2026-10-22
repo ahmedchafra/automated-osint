@@ -6,7 +6,7 @@ export type TabId = 'infrastructure' | 'identity' | 'secrets' | 'threat-intel' |
 
 export interface DomainDeepAnalysisProgress {
   collector: string;
-  status: 'running' | 'done' | 'error';
+  status: 'pending' | 'running' | 'done' | 'error';
   domain?: string;
   findings_count?: number;
   error?: string;
@@ -122,7 +122,7 @@ export type ScanWorkspaceAction =
   | { type: 'PIVOT_FINDINGS'; findings: FindingRow[] }
   | { type: 'PIVOT_RESET' }
   | { type: 'SET_TAB'; tab: TabId }
-  | { type: 'DOMAIN_DEEP_ANALYSIS_STARTED'; domain: string }
+  | { type: 'DOMAIN_DEEP_ANALYSIS_STARTED'; domain: string; collectors?: string[] }
   | { type: 'DOMAIN_DEEP_ANALYSIS_PROGRESS'; payload: any }
   | { type: 'DOMAIN_DEEP_ANALYSIS_COMPLETED'; payload: any }
   | { type: 'EMAIL_DEEP_ANALYSIS_STARTED'; emails: string[] }
@@ -211,16 +211,24 @@ function reducer(state: ScanWorkspaceState, action: ScanWorkspaceAction): ScanWo
         ...state,
         domainDeepAnalysisRunning: true,
         domainDeepAnalysisDomain: action.domain,
-        domainDeepAnalysisProgress: [],
+        domainDeepAnalysisProgress: (action.collectors || []).map(collector => ({
+          collector,
+          status: 'pending' as const,
+          domain: action.domain,
+        })),
       };
-    case 'DOMAIN_DEEP_ANALYSIS_PROGRESS':
+    case 'DOMAIN_DEEP_ANALYSIS_PROGRESS': {
+      const existingIndex = state.domainDeepAnalysisProgress.findIndex(
+        p => p.collector === action.payload.collector
+      );
+      const progress = [...state.domainDeepAnalysisProgress];
+      if (existingIndex >= 0) progress[existingIndex] = action.payload;
+      else progress.push(action.payload);
       return {
         ...state,
-        domainDeepAnalysisProgress: [
-          ...state.domainDeepAnalysisProgress.filter(p => p.collector !== action.payload.collector),
-          action.payload,
-        ],
+        domainDeepAnalysisProgress: progress,
       };
+    }
     case 'DOMAIN_DEEP_ANALYSIS_COMPLETED':
       return { ...state, domainDeepAnalysisRunning: false };
     case 'EMAIL_DEEP_ANALYSIS_STARTED':

@@ -137,7 +137,7 @@ Choose an interaction mode before launching:
 |---|---|
 | **Passive** | Third-party/public datasets only; discovered hosts remain candidates. |
 | **Validated** | Adds wildcard-aware DNS resolution and bounded HTTP `HEAD` liveness checks. This is the default. |
-| **Active** | Authorizes direct checks and future active modules; currently includes the validated pipeline. |
+| **Active** | Includes validation and unlocks an explicit, analyst-triggered active stage: Naabu port discovery → Nmap service fingerprinting, plus a parallel Nuclei web-template branch. |
 
 Domain assets now move through a durable lifecycle: `CANDIDATE` (discovered),
 `RESOLVED` (public DNS evidence), and `LIVE` (HTTP response observed). Wildcard
@@ -160,7 +160,17 @@ The scan workspace has tabbed views:
 
 ### 4. Go Deeper
 
-Click **"Deep Analysis"** on any subdomain to fire 8 collectors + CVE cross-referencing. Pivot from emails to breach checks. Monitor Telegram for brand mentions. Generate AI dorks.
+Click **"Deep Analysis"** on a domain to run mode-aware enrichment and CVE
+cross-referencing. Interactive web collectors only receive verified, in-scope,
+non-wildcard assets. On scans created in **Active** mode, the Canonical Asset
+Inventory also exposes **Run active validation**. That action requires an
+authorization confirmation, caps target fan-out, and runs only against persisted
+public `RESOLVED`/`LIVE` assets. Nuclei redirects, OAST/Interactsh, and templates
+tagged `dos`, `fuzz`, `intrusive`, or `headless` are disabled.
+
+The container image pins Naabu, Nuclei, and the Nuclei template set; Nmap is
+installed from the Debian image repository. Active results appear as port/service
+findings in Infrastructure and Nuclei findings in Web OSINT.
 
 ---
 

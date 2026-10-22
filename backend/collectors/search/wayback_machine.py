@@ -46,7 +46,7 @@ class WaybackMachineCollector(BaseCollector):
 
         # ── CDX API for historical URLs ──────────────────────────────
         _rate_limit()
-        cdx_url = "http://web.archive.org/cdx/search/cdx"
+        cdx_url = "https://web.archive.org/cdx/search/cdx"
         cdx_params = {
             "url": f"*.{target}/*",
             "output": "json",

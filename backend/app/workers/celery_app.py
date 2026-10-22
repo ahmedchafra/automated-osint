@@ -48,6 +48,7 @@ import app.workers.ai_tasks  # noqa: F401, E402
 import app.workers.dnstwist_task  # noqa: F401, E402
 import app.workers.telegram_task  # noqa: F401, E402
 import app.workers.ahmia_task  # noqa: F401, E402
+import app.workers.active_validation  # noqa: F401, E402
 
 # Pre-import the collectors registry in the worker parent process so the
 # forked children inherit it on sys.path. Without this, `from collectors...`

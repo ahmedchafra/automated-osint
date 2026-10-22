@@ -4,6 +4,7 @@ import { useScanWorkspace } from '../../context/ScanWorkspaceContext';
 import { SeverityBadge } from '../FindingsTable';
 import { DeepAnalysisProgress, type ProgressItem } from './DeepAnalysisProgress';
 import apiClient from '../../api/client';
+import { isAxiosError } from 'axios';
 
 const PAGE_SIZE = 25;
 
@@ -19,6 +20,7 @@ export function InfrastructureTab() {
   const [showHarvesterPicker, setShowHarvesterPicker] = useState<string | null>(null);
   const [harvesterMode, setHarvesterMode] = useState<'quick' | 'full' | 'auto'>('auto');
   const [showRawWhois, setShowRawWhois] = useState(false);
+  const [activeValidationError, setActiveValidationError] = useState<string | null>(null);
   const activeJobs = state.jobs.filter(job => ['QUEUED', 'RUNNING', 'RETRYING'].includes(job.status));
   const ledgerEnrichingIps = activeJobs
     .filter(job => job.job_type === 'shodan_enrich' || job.job_type === 'censys_enrich')
@@ -29,6 +31,7 @@ export function InfrastructureTab() {
     || activeJobs.some(job => job.job_type === 'domain_deep_analysis');
   const emailAnalysisRunning = state.emailDeepAnalysisRunning
     || activeJobs.some(job => job.job_type === 'email_deep_analysis');
+  const activeValidationRunning = activeJobs.some(job => job.job_type === 'active_validation');
 
   const mainDomain = state.scan?.target_domain || '';
   const candidateAssets = state.assets.filter(asset => asset.state === 'CANDIDATE');
@@ -36,6 +39,12 @@ export function InfrastructureTab() {
   const liveAssets = state.assets.filter(asset => asset.state === 'LIVE');
   const wildcardAssets = state.assets.filter(asset => asset.wildcard_suspected);
   const liveUrls = liveAssets.filter(asset => asset.asset_type === 'URL');
+  const activeEligibleAssets = state.assets.filter(asset =>
+    asset.in_scope
+    && !asset.wildcard_suspected
+    && (asset.state === 'RESOLVED' || asset.state === 'LIVE')
+    && ['DOMAIN', 'SUBDOMAIN', 'IP_ADDRESS', 'URL'].includes(asset.asset_type)
+  );
   const subdomains = useMemo(() => {
     const byValue = new Map<string, typeof state.findings[number]>();
     for (const finding of state.findings.filter(f => f.entity_type === 'SUBDOMAIN')) {
@@ -59,6 +68,7 @@ export function InfrastructureTab() {
   const httpHeaders = state.findings.filter(f => f.entity_type === 'HTTP_HEADER');
   const historicalUrls = state.findings.filter(f => f.entity_type === 'HISTORICAL_URL');
   const waybackSnapshots = state.findings.filter(f => f.entity_type === 'WAYBACK_SNAPSHOT');
+  const activeVulnerabilities = state.findings.filter(f => f.entity_type === 'VULNERABILITY');
 
   // Unique source modules from findings
   const sourceModules = useMemo(() => {
@@ -155,6 +165,24 @@ export function InfrastructureTab() {
     }
   };
 
+  const handleActiveValidation = async () => {
+    if (!state.scan?.id || state.scan.scan_mode !== 'active' || activeValidationRunning) return;
+    const confirmed = window.confirm(
+      'Run Naabu, Nmap service detection, and safe Nuclei templates against the verified assets in this scan? Only continue if you are authorized to test these targets.'
+    );
+    if (!confirmed) return;
+    setActiveValidationError(null);
+    try {
+      await apiClient.post(`/scans/${state.scan.id}/active-validation`);
+    } catch (err: unknown) {
+      if (isAxiosError<{ detail?: string }>(err)) {
+        setActiveValidationError(err.response?.data?.detail || err.message);
+      } else {
+        setActiveValidationError(err instanceof Error ? err.message : 'Active validation failed to start');
+      }
+    }
+  };
+
   const toggleEmail = (email: string) => {
     setSelectedEmails(prev => {
       const next = new Set(prev);
@@ -219,14 +247,28 @@ export function InfrastructureTab() {
                 Canonical Asset Inventory
               </span>
             </div>
-            <span style={{
-              padding: '2px 7px', borderRadius: 4, fontSize: 9,
-              textTransform: 'uppercase', fontFamily: 'var(--font-mono)',
-              background: 'var(--bg-primary)', color: 'var(--text-muted)',
-              border: '1px solid var(--border)',
-            }}>
-              {state.scan?.scan_mode || 'validated'} mode
-            </span>
+            <div className="flex items-center gap-2">
+              {state.scan?.scan_mode === 'active' && (
+                <button
+                  className="ws-enrich-btn"
+                  disabled={activeValidationRunning || activeEligibleAssets.length === 0}
+                  onClick={handleActiveValidation}
+                  title="Run Naabu → Nmap and Nuclei on verified assets"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, padding: '4px 8px' }}
+                >
+                  {activeValidationRunning ? <Loader2 size={11} className="spin" /> : <Zap size={11} />}
+                  {activeValidationRunning ? 'Active validation running' : 'Run active validation'}
+                </button>
+              )}
+              <span style={{
+                padding: '2px 7px', borderRadius: 4, fontSize: 9,
+                textTransform: 'uppercase', fontFamily: 'var(--font-mono)',
+                background: 'var(--bg-primary)', color: 'var(--text-muted)',
+                border: '1px solid var(--border)',
+              }}>
+                {state.scan?.scan_mode || 'validated'} mode
+              </span>
+            </div>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 8 }}>
             {[
@@ -273,6 +315,14 @@ export function InfrastructureTab() {
           {wildcardAssets.length > 0 && (
             <div style={{ marginTop: 8, fontSize: 10, color: '#f59e0b' }}>
               {wildcardAssets.length} wildcard-matching hostname{wildcardAssets.length === 1 ? '' : 's'} retained as evidence and excluded from service fan-out.
+            </div>
+          )}
+          {activeValidationError && (
+            <div style={{ marginTop: 8, fontSize: 10, color: '#ef4444' }}>{activeValidationError}</div>
+          )}
+          {activeVulnerabilities.length > 0 && (
+            <div style={{ marginTop: 8, fontSize: 10, color: '#f97316' }}>
+              Active validation has reported {activeVulnerabilities.length} potential vulnerabilit{activeVulnerabilities.length === 1 ? 'y' : 'ies'}; review them in Web OSINT.
             </div>
           )}
         </div>
@@ -1057,7 +1107,9 @@ const COLLECTOR_LABELS: Record<string, string> = {
   dnstwist: 'dnstwist',
   builtwith: 'BuiltWith',
   http_headers: 'HTTP Headers',
+  web_surface: 'Verified Web Surface',
   wayback_machine: 'Wayback Machine',
+  version_detector: 'Version Detection',
 };
 
 function getCollectorStatus(
@@ -1066,7 +1118,8 @@ function getCollectorStatus(
 ): 'pending' | 'running' | 'done' | 'error' {
   const entry = progress.find(p => p.collector === collectorName);
   if (!entry) return 'pending';
-  return (entry.status === 'done' || entry.status === 'error') ? entry.status : 'running';
+  if (entry.status === 'pending' || entry.status === 'done' || entry.status === 'error') return entry.status;
+  return 'running';
 }
 
 /** Build the flat list of ProgressItems for the domain deep analysis progress component. */
@@ -1074,7 +1127,11 @@ function buildDomainProgressItems(
   progress: { collector: string; status: string; findings_count?: number; error?: string; phase?: string; technology?: string; index?: number; total?: number }[],
 ): ProgressItem[] {
   // Phase 1: regular collectors
-  const phase1Collectors = ['hunter_domain', 'theharvester', 'github_secrets', 'dnstwist', 'builtwith', 'http_headers', 'wayback_machine'];
+  const phase1Collectors = Array.from(new Set(
+    progress
+      .map(item => item.collector)
+      .filter(name => name && !name.startsWith('technology_cve:'))
+  ));
   const items: ProgressItem[] = [];
 
   for (const name of phase1Collectors) {
@@ -1671,7 +1728,7 @@ function DeepAnalysisPanel({
               })}
             </div>
           ) : (() => {
-            const hh = getCollectorStatus(domainAnalysisProgress, 'http_headers');
+            const hh = getCollectorStatus(domainAnalysisProgress, 'web_surface');
             if (hh === 'running') {
               return <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '8px 0', display: 'flex', alignItems: 'center', gap: 6 }}>
                 <Loader2 size={10} className="animate-spin" />

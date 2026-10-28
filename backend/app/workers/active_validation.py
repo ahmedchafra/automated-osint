@@ -5,9 +5,12 @@ created in ``active`` mode and consumes the persisted canonical asset inventory:
 
     verified public IPs -> Naabu -> Nmap service fingerprinting
     verified live URLs  -> Nuclei safe template scan
+                        -> TLS posture assessment
+                        -> bounded scoped crawl
+    scoped subdomains   -> DNS/provider takeover verification
 
-The network and web branches run in parallel. Nmap remains chained behind
-Naabu so it only touches ports that were confirmed open.
+The network, web, TLS, crawl, and takeover branches run in parallel. Nmap remains
+chained behind Naabu so it only touches ports that were confirmed open.
 """
 from __future__ import annotations
 
@@ -31,6 +34,13 @@ from app.models.scan import Scan
 from app.services.correlation import CorrelationEngine
 from app.services.http_validation import public_ip_set
 from app.services.progress import ScanProgressPublisher
+from app.services.scope import ScopeEvaluator
+from app.services.scoped_crawler import MAX_CRAWL_PAGES, MAX_CRAWL_SEEDS, crawl_urls
+from app.services.takeover_verification import (
+    MAX_TAKEOVER_TARGETS,
+    verify_takeover_candidates,
+)
+from app.services.tls_assessment import MAX_TLS_TARGETS, assess_tls_urls
 from app.workers.celery_app import celery_app
 from app.workers.task_utils import _run, persist_findings
 
@@ -237,17 +247,23 @@ def _require_tool(name: str) -> str:
     return path
 
 
-async def _run_naabu(ips: list[str], directory: Path) -> list[dict[str, Any]]:
+async def _run_naabu(
+    ips: list[str], directory: Path, allowed_ports: list[int]
+) -> list[dict[str, Any]]:
     if not ips:
         return []
     target_file = directory / "naabu-targets.txt"
     target_file.write_text("\n".join(ips) + "\n", encoding="utf-8")
+    port_args = ["-ports", ",".join(str(port) for port in allowed_ports)] if allowed_ports else ["-top-ports", "100"]
     stdout, _ = await _run_process(
         _require_tool("naabu"), "-list", str(target_file), "-json", "-silent",
-        "-top-ports", "100", "-rate", "100", "-timeout", "3s",
-        "-retries", "1", timeout=300,
+        *port_args, "-rate", "100", "-timeout", "3s", "-retries", "1", timeout=300,
     )
-    return parse_naabu_jsonl(stdout)
+    findings = parse_naabu_jsonl(stdout)
+    return [
+        finding for finding in findings
+        if not allowed_ports or finding["normalized_data"]["port"] in allowed_ports
+    ]
 
 
 async def _run_nmap_for_host(
@@ -263,10 +279,11 @@ async def _run_nmap_for_host(
 
 
 async def _run_network_branch(
-    ips: list[str], directory: Path, publisher: ScanProgressPublisher, scan_id: str
+    ips: list[str], directory: Path, publisher: ScanProgressPublisher, scan_id: str,
+    allowed_ports: list[int],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     await publisher.publish(scan_id, "active_tool_started", {"tool": "naabu", "targets": len(ips)})
-    naabu_findings = await _run_naabu(ips, directory)
+    naabu_findings = await _run_naabu(ips, directory, allowed_ports)
     await publisher.publish(scan_id, "active_tool_completed", {"tool": "naabu", "findings": len(naabu_findings)})
 
     ports_by_host: dict[str, set[int]] = {}
@@ -309,7 +326,70 @@ async def _run_nuclei(
     return findings
 
 
-async def _verified_targets(session, scan_id: str) -> tuple[list[str], list[str]]:
+async def _run_tls_assessment(
+    urls: list[str], publisher: ScanProgressPublisher, scan_id: str
+) -> list[dict[str, Any]]:
+    https_targets = {
+        (parsed.hostname.lower().rstrip("."), parsed.port or 443)
+        for url in urls
+        if (parsed := urlparse(url)).scheme == "https" and parsed.hostname
+    }
+    target_count = min(len(https_targets), MAX_TLS_TARGETS)
+    await publisher.publish(
+        scan_id, "active_tool_started", {"tool": "tls_assessment", "targets": target_count}
+    )
+    findings = await assess_tls_urls(urls)
+    await publisher.publish(
+        scan_id, "active_tool_completed", {"tool": "tls_assessment", "findings": len(findings)}
+    )
+    return findings
+
+
+async def _run_scoped_crawl(
+    urls: list[str],
+    scope: ScopeEvaluator,
+    publisher: ScanProgressPublisher,
+    scan_id: str,
+) -> list[dict[str, Any]]:
+    target_count = min(len(urls), MAX_CRAWL_SEEDS)
+    await publisher.publish(
+        scan_id, "active_tool_started", {"tool": "scoped_crawler", "targets": target_count}
+    )
+    findings = await crawl_urls(urls, scope)
+    await publisher.publish(
+        scan_id, "active_tool_completed", {"tool": "scoped_crawler", "findings": len(findings)}
+    )
+    return findings
+
+
+async def _run_takeover_verification(
+    hostnames: list[str],
+    scope: ScopeEvaluator,
+    publisher: ScanProgressPublisher,
+    scan_id: str,
+) -> list[dict[str, Any]]:
+    target_count = min(len(hostnames), MAX_TAKEOVER_TARGETS)
+    await publisher.publish(
+        scan_id,
+        "active_tool_started",
+        {"tool": "takeover_verification", "targets": target_count},
+    )
+    findings = await verify_takeover_candidates(hostnames, scope)
+    await publisher.publish(
+        scan_id,
+        "active_tool_completed",
+        {"tool": "takeover_verification", "findings": len(findings)},
+    )
+    return findings
+
+
+async def _verified_targets(
+    session, scan: Scan
+) -> tuple[list[str], list[str], list[str]]:
+    scan_id = scan.id
+    evaluator = ScopeEvaluator(
+        scan.scope_manifest, target_type=scan.target_type, target=scan.target_domain
+    )
     result = await session.execute(
         select(Asset).where(
             Asset.scan_id == scan_id,
@@ -320,17 +400,33 @@ async def _verified_targets(session, scan_id: str) -> tuple[list[str], list[str]
     assets = result.scalars().all()
     ips: set[str] = set()
     urls: set[str] = set()
+    takeover_hostnames: set[str] = set()
     for asset in assets:
         if asset.asset_type == "IP_ADDRESS" and asset.state in {"RESOLVED", "LIVE"}:
-            if _public_ip(asset.canonical_value):
+            decision = evaluator.evaluate_asset("IP_ADDRESS", asset.canonical_value, derived=True)
+            if decision.allowed and _public_ip(asset.canonical_value):
                 ips.add(asset.canonical_value)
         if asset.asset_type in {"DOMAIN", "SUBDOMAIN"} and asset.state in {"RESOLVED", "LIVE"}:
-            ips.update(value for value in (asset.resolved_ips or []) if _public_ip(value))
+            host_decision = evaluator.evaluate_asset(asset.asset_type, asset.canonical_value)
+            if host_decision.allowed:
+                ips.update(
+                    value for value in (asset.resolved_ips or [])
+                    if evaluator.evaluate_ip(value, derived_from_allowed_host=True).allowed
+                )
+        if asset.asset_type == "SUBDOMAIN":
+            host_decision = evaluator.evaluate_asset("SUBDOMAIN", asset.canonical_value)
+            if host_decision.allowed:
+                takeover_hostnames.add(asset.canonical_value.lower().rstrip("."))
         if asset.asset_type == "URL" and asset.state == "LIVE":
             parsed = urlparse(asset.canonical_value)
-            if parsed.scheme in {"http", "https"} and parsed.hostname and await _hostname_is_public(parsed.hostname):
+            url_decision = evaluator.evaluate_asset("URL", asset.canonical_value)
+            if url_decision.allowed and parsed.hostname and await _hostname_is_public(parsed.hostname):
                 urls.add(asset.canonical_value)
-    return sorted(ips)[:MAX_ACTIVE_IPS], sorted(urls)[:MAX_ACTIVE_URLS]
+    return (
+        sorted(ips)[:MAX_ACTIVE_IPS],
+        sorted(urls)[:MAX_ACTIVE_URLS],
+        sorted(takeover_hostnames)[:MAX_TAKEOVER_TARGETS],
+    )
 
 
 async def _run_active_validation(scan_id: str) -> dict[str, Any]:
@@ -342,32 +438,71 @@ async def _run_active_validation(scan_id: str) -> dict[str, Any]:
             raise PermissionError("active validation requires a scan created in active mode")
 
         publisher = ScanProgressPublisher()
-        ips, urls = await _verified_targets(session, scan_id)
+        ips, urls, takeover_hostnames = await _verified_targets(session, scan)
+        scope = ScopeEvaluator(
+            scan.scope_manifest, target_type=scan.target_type, target=scan.target_domain
+        )
+        allowed_ports = list((scan.scope_manifest or {}).get("allowed_ports") or [])
         await publisher.publish(scan_id, "active_validation_started", {
-            "ip_targets": len(ips), "url_targets": len(urls),
-            "limits": {"ips": MAX_ACTIVE_IPS, "urls": MAX_ACTIVE_URLS},
+            "ip_targets": len(ips),
+            "url_targets": len(urls),
+            "takeover_targets": len(takeover_hostnames),
+            "limits": {
+                "ips": MAX_ACTIVE_IPS,
+                "urls": MAX_ACTIVE_URLS,
+                "crawl_seeds": MAX_CRAWL_SEEDS,
+                "crawl_pages": MAX_CRAWL_PAGES,
+                "takeover_targets": MAX_TAKEOVER_TARGETS,
+            },
         })
 
         with tempfile.TemporaryDirectory(prefix="osint-active-") as temp_dir:
             directory = Path(temp_dir)
-            network_task = _run_network_branch(ips, directory, publisher, scan_id)
+            network_task = _run_network_branch(
+                ips, directory, publisher, scan_id, allowed_ports
+            )
             nuclei_task = _run_nuclei(urls, directory, publisher, scan_id)
-            (naabu_findings, nmap_findings), nuclei_findings = await asyncio.gather(
-                network_task, nuclei_task
+            tls_task = _run_tls_assessment(urls, publisher, scan_id)
+            crawl_task = _run_scoped_crawl(urls, scope, publisher, scan_id)
+            takeover_task = _run_takeover_verification(
+                takeover_hostnames, scope, publisher, scan_id
+            )
+            (
+                (naabu_findings, nmap_findings),
+                nuclei_findings,
+                tls_findings,
+                crawl_findings,
+                takeover_findings,
+            ) = await asyncio.gather(
+                network_task, nuclei_task, tls_task, crawl_task, takeover_task
             )
 
-        findings = [*naabu_findings, *nmap_findings, *nuclei_findings]
+        findings = [
+            *naabu_findings,
+            *nmap_findings,
+            *nuclei_findings,
+            *tls_findings,
+            *crawl_findings,
+            *takeover_findings,
+        ]
         persisted = await persist_findings(session, scan_id, findings, default_vector="SERVICES")
         await session.flush()
         links_created = await CorrelationEngine(session, scan_id).run()
         await session.commit()
         result = {
             "scan_id": scan_id,
-            "targets": {"ips": len(ips), "urls": len(urls)},
+            "targets": {
+                "ips": len(ips),
+                "urls": len(urls),
+                "takeover_hostnames": len(takeover_hostnames),
+            },
             "findings": {
                 "naabu": len(naabu_findings),
                 "nmap": len(nmap_findings),
                 "nuclei": len(nuclei_findings),
+                "tls_assessment": len(tls_findings),
+                "scoped_crawler": len(crawl_findings),
+                "takeover_verification": len(takeover_findings),
                 "persisted": persisted,
             },
             "links_created": links_created,

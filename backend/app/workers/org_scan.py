@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from app.workers.celery_app import celery_app
 from app.database import AsyncSessionLocal
 from app.workers.task_utils import _run, persist_findings
+from app.services.discovery import process_discovery_findings
 from app.models.scan import Scan
 from app.services.progress import ScanProgressPublisher
 
@@ -125,6 +126,10 @@ async def _run_org_domain_phase(scan_id: str, session, publisher, thread_pool) -
     # Whoxy reverse-whois discovery
     whoxy_findings = await _run_tool("reverse_whois_whoxy", org_name, scan_id, session, publisher, thread_pool)
     findings.extend(whoxy_findings)
+    findings = process_discovery_findings(
+        findings,
+        hostname_entity_types=frozenset({"DOMAIN_METADATA"}),
+    ).findings
 
     for finding in findings:
         value = str(finding.get("entity_value", ""))
@@ -140,6 +145,8 @@ async def _run_org_domain_phase(scan_id: str, session, publisher, thread_pool) -
             value=value,
             state="CANDIDATE",
             source_module=finding.get("source_module"),
+            in_scope=False,
+            scope_reason="organization candidates require manual selection",
         )
 
     total += await persist_findings(session, scan_id, findings)
@@ -290,7 +297,7 @@ async def _run_org_infra(scan_id: str, domain: str) -> dict:
             # ─── INFRASTRUCTURE ─────────────────────────────────────────────
             await publisher.publish(scan_id, "phase_started", {
                 "phase": "INFRASTRUCTURE", "phase_index": 1,
-                "tools": ["crtsh", "subfinder", "theharvester", "dns_resolver", "shodan_internetdb", "whois_lookup"],
+                "tools": ["crtsh", "subfinder", "theharvester", "common_crawl", "dns_email_posture", "dns_resolver", "shodan_internetdb", "whois_lookup", "rdap_lookup", "ripestat"],
             })
 
             all_subdomains, resolved_ips, infra_findings = await _run_infra_phase(

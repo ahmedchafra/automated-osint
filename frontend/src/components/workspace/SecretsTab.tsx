@@ -1,284 +1,188 @@
-import { useState, useMemo } from 'react';
-import { GitBranch, Key, FileCode, Loader2, ShieldCheck, ExternalLink, Copy } from 'lucide-react';
-import { useScanWorkspace } from '../../context/ScanWorkspaceContext';
+import { useMemo, useState } from 'react';
+import { AlertTriangle, GitBranch, Key, Loader2, Search, ShieldCheck } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useScanWorkspace } from '../../context/scan-workspace-state';
 import apiClient from '../../api/client';
+import { errorMessage } from '../../utils/errors';
+import { GithubRepositoryTable } from './GithubRepositoryTable';
+import { SecretExposureCard } from './SecretExposureCard';
+import { toGithubRepository, toGithubSecret } from './githubEvidence';
+import type { PaginatedFindings } from '../../types/api';
 
-const SEVERITY_BG: Record<string, string> = {
-  CRITICAL: 'var(--severity-critical, #b91c1c)',
-  HIGH: 'var(--severity-high)',
-  MEDIUM: 'var(--severity-medium)',
-  LOW: 'var(--severity-low)',
-  INFO: 'var(--severity-info, #64748b)',
-};
+const ACTIVE = new Set(['QUEUED', 'RUNNING', 'RETRYING']);
+const PAGE_SIZE = 25;
+const SEVERITY_ORDER = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'];
 
-const SEVERITY_BADGE: Record<string, string> = {
-  CRITICAL: 'badge-danger',
-  HIGH: 'badge-danger',
-  MEDIUM: 'badge-warning',
-  LOW: 'badge-info',
-  INFO: 'badge-info',
-};
-
-export function SecretsTab() {
+export function SecretsTab({ canModify = true }: { canModify?: boolean }) {
   const { state } = useScanWorkspace();
-  const [scanRunning, setScanRunning] = useState(false);
-  const [scannedDomain, setScannedDomain] = useState<string | null>(null);
-  const persistedScanRunning = state.jobs.some(job =>
-    job.job_type === 'github_secrets_scan'
-    && ['QUEUED', 'RUNNING', 'RETRYING'].includes(job.status)
+  const queryClient = useQueryClient();
+  const [requestPending, setRequestPending] = useState(false);
+  const [requestError, setRequestError] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
+  const [severity, setSeverity] = useState('ALL');
+  const [secretType, setSecretType] = useState('ALL');
+  const [page, setPage] = useState(1);
+  const [repoPage, setRepoPage] = useState(1);
+
+  const githubJobs = state.jobs.filter(job => job.job_type === 'github_secrets_scan');
+  const latestJob = githubJobs[0];
+  const persistedRunning = githubJobs.some(job => ACTIVE.has(job.status));
+  const isRunning = requestPending || persistedRunning;
+  const scan = state.scan;
+  const baseDomain = scan?.target_domain || '';
+  const supportsDomainScan = Boolean(baseDomain) && scan?.target_type !== 'ip';
+  const { data: secretResponse } = useQuery<PaginatedFindings>({
+    queryKey: ['scanFindings', scan?.id, 'LEAKED_SECRET'],
+    queryFn: async () => (await apiClient.get('/findings/', {
+      params: { scan_id: scan?.id, entity_type: 'LEAKED_SECRET', limit: 5000 },
+    })).data,
+    enabled: Boolean(scan?.id),
+    refetchInterval: isRunning ? 4_000 : false,
+  });
+  const { data: repositoryResponse } = useQuery<PaginatedFindings>({
+    queryKey: ['scanFindings', scan?.id, 'GITHUB_REPO'],
+    queryFn: async () => (await apiClient.get('/findings/', {
+      params: { scan_id: scan?.id, entity_type: 'GITHUB_REPO', limit: 5000 },
+    })).data,
+    enabled: Boolean(scan?.id),
+    refetchInterval: isRunning ? 4_000 : false,
+  });
+
+  const secrets = useMemo(
+    () => (secretResponse?.items ?? state.findings.filter(finding => finding.entity_type === 'LEAKED_SECRET')).map(toGithubSecret),
+    [secretResponse?.items, state.findings],
   );
-  const isScanRunning = scanRunning || persistedScanRunning;
+  const repositories = useMemo(
+    () => (repositoryResponse?.items ?? state.findings.filter(finding => finding.entity_type === 'GITHUB_REPO')).map(toGithubRepository),
+    [repositoryResponse?.items, state.findings],
+  );
+  const secretTypes = useMemo(
+    () => [...new Set(secrets.map(item => item.secretType))].sort(),
+    [secrets],
+  );
+  const severityCounts = useMemo(() => Object.fromEntries(
+    SEVERITY_ORDER.map(level => [level, secrets.filter(item => item.severity === level).length]),
+  ), [secrets]);
 
-  const repos = state.findings.filter(f => f.entity_type === 'GITHUB_REPO');
-  const secrets = state.findings.filter(f => f.entity_type === 'LEAKED_SECRET');
-  const baseDomain = state.scan?.target_domain || '';
+  const filteredSecrets = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    return secrets
+      .filter(item => severity === 'ALL' || item.severity === severity)
+      .filter(item => secretType === 'ALL' || item.secretType === secretType)
+      .filter(item => !needle || `${item.repoName} ${item.filePath} ${item.secretType}`.toLowerCase().includes(needle))
+      .sort((a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity));
+  }, [search, secretType, secrets, severity]);
 
-  const secretTypes = useMemo(() => {
-    const acc: Record<string, number> = {};
-    for (const s of secrets) {
-      const t = String(s.normalized_data?.secret_type ?? s.normalized_data?.type ?? 'UNKNOWN');
-      acc[t] = (acc[t] || 0) + 1;
-    }
-    return acc;
-  }, [secrets]);
+  const secretPages = Math.max(1, Math.ceil(filteredSecrets.length / PAGE_SIZE));
+  const currentPage = Math.min(page, secretPages);
+  const visibleSecrets = filteredSecrets.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  const repoPages = Math.max(1, Math.ceil(repositories.length / PAGE_SIZE));
+  const currentRepoPage = Math.min(repoPage, repoPages);
+  const visibleRepositories = repositories.slice((currentRepoPage - 1) * PAGE_SIZE, currentRepoPage * PAGE_SIZE);
+  const hasLegacyEvidence = secrets.some(item => !item.classifierVersion)
+    || repositories.some(item => !item.searchStrategy);
 
-  const severityCounts = useMemo(() => {
-    const acc: Record<string, number> = {};
-    for (const s of secrets) {
-      acc[s.severity] = (acc[s.severity] || 0) + 1;
-    }
-    return acc;
-  }, [secrets]);
-
-  // Sort secrets: HIGH/CRITICAL first, then MEDIUM, then LOW/INFO
-  const sortedSecrets = useMemo(() => {
-    const order: Record<string, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, INFO: 4 };
-    return [...secrets].sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
-  }, [secrets]);
-
-  const handleScanSecrets = async () => {
-    if (!baseDomain || !state.scan?.id) return;
-    setScanRunning(true);
-    setScannedDomain(baseDomain);
+  const handleScan = async () => {
+    if (!scan?.id || !supportsDomainScan || !canModify) return;
+    setRequestPending(true);
+    setRequestError(null);
     try {
-      await apiClient.post(`/scans/${state.scan.id}/secrets-scan`, { domain: baseDomain });
-    } catch (err: any) {
-      console.error('Secrets scan failed:', err);
+      await apiClient.post(`/scans/${scan.id}/secrets-scan`, { domain: baseDomain });
+      await queryClient.invalidateQueries({ queryKey: ['scanJobs', scan.id] });
+    } catch (error) {
+      setRequestError(errorMessage(error, 'Unable to start GitHub exposure search.'));
     } finally {
-      setScanRunning(false);
+      setRequestPending(false);
     }
   };
 
-  if (repos.length === 0 && secrets.length === 0 && !isScanRunning) {
-    return (
-      <div className="ws-empty" style={{ padding: '2rem' }}>
-        <ShieldCheck size={32} style={{ marginBottom: 8, opacity: 0.4 }} />
-        <div>No secret exposure data yet.</div>
-        <div style={{ fontSize: 11, marginTop: 4, color: 'var(--text-muted)' }}>
-          Scan GitHub for leaked API keys, tokens, and credentials associated with {baseDomain}.
-        </div>
-        <button
-          className="ws-enrich-btn-primary"
-          onClick={handleScanSecrets}
-          disabled={!baseDomain}
-          style={{
-            marginTop: 12,
-            display: 'inline-flex', alignItems: 'center', gap: 6,
-            padding: '6px 16px', borderRadius: 6, fontSize: 12, fontWeight: 500, border: 'none',
-            cursor: !baseDomain ? 'not-allowed' : 'pointer',
-            opacity: !baseDomain ? 0.5 : 1,
-            background: 'var(--accent)', color: '#fff',
-          }}
-        >
-          <Key size={13} />
-          Scan GitHub Secrets
-        </button>
-      </div>
-    );
-  }
+  const failure = requestError || (latestJob?.status === 'FAILED' ? latestJob.error || 'GitHub exposure search failed.' : null);
 
   return (
     <div className="ws-secrets">
-      {/* Header / scan panel */}
-      <div style={{ marginBottom: 16, padding: '12px 16px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Key size={14} style={{ color: 'var(--accent)' }} />
-            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-strong)' }}>GitHub Secrets Vault</span>
-            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-              {secrets.length} secret{secrets.length === 1 ? '' : 's'} · {repos.length} repo{repos.length === 1 ? '' : 's'}
-            </span>
+      <section className="workspace-panel ws-secrets-hero">
+        <div className="workspace-panel-heading">
+          <div>
+            <span className="workspace-eyebrow">Public code intelligence</span>
+            <h2>GitHub exposure review</h2>
           </div>
-          <button
-            className="ws-enrich-btn-primary"
-            onClick={handleScanSecrets}
-            disabled={isScanRunning}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 6,
-              padding: '5px 14px', borderRadius: 6, fontSize: 12, fontWeight: 500, border: 'none',
-              cursor: isScanRunning ? 'not-allowed' : 'pointer',
-              opacity: isScanRunning ? 0.5 : 1,
-              background: 'var(--accent)', color: '#fff',
-            }}
-          >
-            {isScanRunning ? <Loader2 size={12} className="animate-spin" /> : <Key size={12} />}
-            {isScanRunning ? 'Scanning...' : 'Scan Again'}
-          </button>
+          {canModify && supportsDomainScan && (
+            <button className="ws-enrich-btn-primary" onClick={handleScan} disabled={isRunning}>
+              {isRunning ? <Loader2 size={13} className="animate-spin" /> : <Key size={13} />}
+              {isRunning ? 'Searching…' : githubJobs.length ? 'Search again' : 'Search GitHub'}
+            </button>
+          )}
         </div>
-        {isScanRunning && (
-          <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>
-            Scanning {scannedDomain} public repos for leaked secrets...
+        <p>
+          Finds public repository files that combine credential indicators with the target name or domain.
+          Matches are leads for manual validation—not proof that a credential is valid or owned by the target.
+        </p>
+        <div className="ws-secret-privacy">
+          <ShieldCheck size={14} /> Secret values and file contents are intentionally not stored; only evidence metadata and GitHub links are retained.
+        </div>
+        {!canModify && <div className="ws-secret-note">Read-only access: you can review evidence but cannot launch collectors.</div>}
+        {scan?.target_type === 'ip' && <div className="ws-secret-note">GitHub exposure search requires a domain target and is unavailable for IP-only scans.</div>}
+        {hasLegacyEvidence && <div className="ws-secret-note"><AlertTriangle size={14} />Some stored results predate the exact-domain classifier and retain their historical score. Treat them as legacy leads; new scans use the stricter rules.</div>}
+        {latestJob && (
+          <div className="ws-secret-job">
+            Latest run: <strong>{latestJob.status.toLowerCase()}</strong>
+            {latestJob.input_value ? ` for ${latestJob.input_value}` : ''}
           </div>
         )}
-      </div>
+        {failure && <div className="ws-secret-error" role="alert"><AlertTriangle size={14} />{failure}</div>}
+      </section>
 
-      {/* Severity summary chips */}
-      {secrets.length > 0 && (
-        <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
-          {Object.entries(severityCounts)
-            .sort(([a], [b]) => {
-              const order = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'];
-              return order.indexOf(a) - order.indexOf(b);
-            })
-            .map(([sev, count]) => (
-              <div
-                key={sev}
-                style={{
-                  padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 600,
-                  background: SEVERITY_BG[sev] || 'var(--severity-info, #64748b)',
-                  color: '#fff',
-                }}
-              >
-                {count} {sev}
-              </div>
-            ))}
-          <div style={{ flex: 1 }} />
-          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-            {Object.keys(secretTypes).length} type{Object.keys(secretTypes).length === 1 ? '' : 's'}
-          </div>
+      <section className="workspace-panel">
+        <div className="workspace-panel-heading">
+          <div><span className="workspace-eyebrow">Potential exposure</span><h2>Credential indicators ({secretResponse?.total ?? secrets.length})</h2></div>
+          <Key size={18} />
         </div>
-      )}
+        {secrets.length > 0 ? (
+          <>
+            <div className="ws-secret-severity-row">
+              {SEVERITY_ORDER.filter(level => severityCounts[level]).map(level => (
+                <button key={level} className={`severity-filter severity-${level.toLowerCase()}${severity === level ? ' active' : ''}`} onClick={() => { setSeverity(severity === level ? 'ALL' : level); setPage(1); }}>
+                  {severityCounts[level]} {level}
+                </button>
+              ))}
+            </div>
+            <div className="ws-secret-filters">
+              <label><Search size={14} /><input value={search} onChange={event => { setSearch(event.target.value); setPage(1); }} placeholder="Repository, file, or type" /></label>
+              <select value={secretType} onChange={event => { setSecretType(event.target.value); setPage(1); }} aria-label="Secret type">
+                <option value="ALL">All secret types</option>
+                {secretTypes.map(type => <option value={type} key={type}>{type}</option>)}
+              </select>
+            </div>
+            {visibleSecrets.length ? (
+              <div className="ws-secrets-feed">{visibleSecrets.map(item => <SecretExposureCard key={item.id} evidence={item} />)}</div>
+            ) : <div className="workspace-empty">No potential exposures match these filters.</div>}
+            <Pagination page={currentPage} pages={secretPages} total={filteredSecrets.length} onChange={setPage} />
+          </>
+        ) : (
+          <div className="workspace-empty">No GitHub credential indicators are stored for this scan.</div>
+        )}
+      </section>
 
-      {/* Type breakdown — pills */}
-      {Object.keys(secretTypes).length > 0 && (
-        <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
-          {Object.entries(secretTypes)
-            .sort(([, a], [, b]) => b - a)
-            .map(([t, n]) => (
-              <span
-                key={t}
-                style={{
-                  fontSize: 10, padding: '2px 8px', borderRadius: 4,
-                  background: 'var(--bg-secondary)', border: '1px solid var(--border)',
-                  color: 'var(--text-muted)', fontFamily: 'var(--font-mono)',
-                }}
-              >
-                {t} · {n}
-              </span>
-            ))}
+      <section className="workspace-panel">
+        <div className="workspace-panel-heading">
+          <div><span className="workspace-eyebrow">Search context</span><h2>Related public repository matches ({repositoryResponse?.total ?? repositories.length})</h2></div>
+          <GitBranch size={18} />
         </div>
-      )}
+        <p className="ws-secret-section-note">Name, description, or README search matches provide context only; they do not establish repository ownership.</p>
+        {visibleRepositories.length
+          ? <><GithubRepositoryTable repositories={visibleRepositories} /><Pagination page={currentRepoPage} pages={repoPages} total={repositories.length} onChange={setRepoPage} /></>
+          : <div className="workspace-empty">No related repositories are stored for this scan.</div>}
+      </section>
+    </div>
+  );
+}
 
-      {/* Secrets feed */}
-      {sortedSecrets.length > 0 && (
-        <>
-          <h3 className="mb-3 flex items-center gap-2">
-            <Key size={18} className="text-accent-danger" />
-            Leaked Secrets ({sortedSecrets.length})
-          </h3>
-          <div className="ws-secrets-feed">
-            {sortedSecrets.map(s => {
-              const nd = (s.normalized_data || {}) as Record<string, any>;
-              const secretType = String(nd.secret_type ?? nd.type ?? 'SECRET');
-              const repoName = String(nd.repository ?? nd.repo ?? nd.repo_name ?? s.entity_value);
-              const filePath = nd.file ?? nd.file_path;
-              const fileUrl = nd.url ?? nd.file_url;
-              const snippet = nd.snippet;
-              return (
-                <div key={s.id} className="ws-secret-card">
-                  <div className="ws-secret-header">
-                    <span className="ws-secret-type">{secretType}</span>
-                    <span className={`badge ${SEVERITY_BADGE[s.severity] || 'badge-info'}`}>
-                      {s.severity}
-                    </span>
-                  </div>
-                  <div className="ws-secret-repo font-mono text-sm mb-2">
-                    <GitBranch size={14} className="mr-1" />
-                    {repoName}
-                  </div>
-                  {filePath != null && (
-                    <div className="ws-secret-file font-mono text-xs text-gray mb-2">
-                      <FileCode size={12} className="mr-1" />
-                      {String(filePath)}
-                    </div>
-                  )}
-                  {snippet != null && (
-                    <div className="ws-code-block">
-                      <code>{String(snippet)}</code>
-                    </div>
-                  )}
-                  {fileUrl != null && (
-                    <a
-                      href={String(fileUrl)}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-accent text-xs mt-2 inline-flex items-center gap-3"
-                    >
-                      <span>
-                        <ExternalLink size={11} className="mr-1" />
-                        View on GitHub
-                      </span>
-                      <span
-                        style={{ cursor: 'pointer', color: 'var(--text-muted)' }}
-                        onClick={(e) => {
-                          e.preventDefault();
-                          navigator.clipboard?.writeText(String(fileUrl));
-                        }}
-                        title="Copy file URL"
-                      >
-                        <Copy size={11} className="mr-1" />
-                        Copy URL
-                      </span>
-                    </a>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </>
-      )}
-
-      {/* Repositories */}
-      {repos.length > 0 && (
-        <>
-          <h3 className="mb-3 mt-6 flex items-center gap-2">
-            <GitBranch size={18} className="text-accent-primary" />
-            Related Repositories ({repos.length})
-          </h3>
-          <div className="table-container">
-            <table>
-              <thead>
-                <tr>
-                  <th>Repository</th>
-                  <th>Stars</th>
-                  <th>Language</th>
-                </tr>
-              </thead>
-              <tbody>
-                {repos.map(r => (
-                  <tr key={r.id}>
-                    <td className="font-mono" style={{ color: 'var(--text-strong)' }}>
-                      {String(r.normalized_data?.name ?? r.entity_value)}
-                    </td>
-                    <td className="text-gray">{String(r.normalized_data?.stars ?? '—')}</td>
-                    <td className="text-gray">{String(r.normalized_data?.language ?? '—')}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </>
-      )}
+function Pagination({ page, pages, total, onChange }: { page: number; pages: number; total: number; onChange: (page: number) => void }) {
+  if (pages <= 1) return null;
+  return (
+    <div className="evidence-pagination">
+      <span>{total.toLocaleString()} results · page {page} of {pages}</span>
+      <div><button disabled={page <= 1} onClick={() => onChange(page - 1)}>Previous</button><button disabled={page >= pages} onClick={() => onChange(page + 1)}>Next</button></div>
     </div>
   );
 }

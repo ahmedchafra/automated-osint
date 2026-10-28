@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     # Runtime
     APP_ENV: str = "development"
     CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
+    SCREENSHOT_STORAGE_PATH: str = "/app/data/screenshots"
 
     # JWT Auth
     JWT_SECRET_KEY: str = "osint-jwt-secret-change-in-production-12345"

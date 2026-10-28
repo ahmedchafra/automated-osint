@@ -31,7 +31,7 @@ class CrtshCollector(BaseCollector):
 
         results: list[dict] = []
         seen_serials: set[str] = set()
-        seen_subdomains: set[str] = set()
+        subdomain_serials: dict[str, set[str]] = {}
 
         for entry in data:
             serial = str(entry.get("serial_number", ""))
@@ -64,17 +64,19 @@ class CrtshCollector(BaseCollector):
                 },
             })
 
-            # Emit one SUBDOMAIN per unique subdomain from this cert
+            # Aggregate every certificate serial that supports a hostname.
             for sub in subdomains:
-                if sub in seen_subdomains:
-                    continue
-                seen_subdomains.add(sub)
-                results.append({
-                    "type": "SUBDOMAIN",
-                    "value": sub,
-                    "source": "crtsh",
-                    "cert_serial": serial,
-                })
+                subdomain_serials.setdefault(sub, set()).add(serial)
+
+        for subdomain, serials in sorted(subdomain_serials.items()):
+            ordered_serials = sorted(serials)
+            results.append({
+                "type": "SUBDOMAIN",
+                "value": subdomain,
+                "source": "crtsh",
+                "cert_serial": ordered_serials[0],
+                "cert_serials": ordered_serials,
+            })
 
         return results
 
@@ -112,5 +114,6 @@ class CrtshCollector(BaseCollector):
                 "source": "crtsh",
                 "subdomain": raw.get("value", raw.get("subdomain", "")),
                 "cert_serial": raw.get("cert_serial", ""),
+                "cert_serials": raw.get("cert_serials", []),
             },
         }

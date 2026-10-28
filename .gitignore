@@ -33,3 +33,13 @@ frontend/dist-ssr/
 
 # ── Logs ─────────────────────────────────────────────────────
 *.log
+
+# Runtime evidence (database rows reference these files)
+backend/data/screenshots/
+
+# Local diagnostics and generated test artifacts
+.artifacts/
+backend/test files/
+tests/*.pdf
+celery@*
+*findings_response.json

@@ -25,12 +25,14 @@ from concurrent.futures import ThreadPoolExecutor
 from app.workers.celery_app import celery_app
 from app.database import AsyncSessionLocal
 from app.workers.task_utils import _run, persist_findings
+from app.services.discovery import process_discovery_findings
 from app.models.scan import Scan
 from app.services.progress import ScanProgressPublisher
 from app.config import settings
 
 
 TOOL_WATCHDOG_SECONDS = 300  # 5 minutes — only kills truly hung tools
+MAX_REGISTRY_IP_TARGETS = 25
 logger = logging.getLogger("osint.unified_scan")
 
 # Tools that need their own event loop (they call asyncio.get_event_loop() internally)
@@ -175,7 +177,7 @@ async def _run_pipeline(scan_id: str) -> dict:
             await publisher.publish(scan_id, "phase_started", {
                 "phase": "INFRASTRUCTURE",
                 "phase_index": 1,
-                "tools": ["crtsh", "subfinder", "theharvester", "dns_resolver", "shodan_internetdb", "whois_lookup"],
+                "tools": ["crtsh", "subfinder", "theharvester", "common_crawl", "dns_email_posture", "dns_resolver", "shodan_internetdb", "whois_lookup", "rdap_lookup", "ripestat"],
             })
 
             all_subdomains = set()
@@ -183,7 +185,10 @@ async def _run_pipeline(scan_id: str) -> dict:
             theharvester_emails = set()
 
             # 1a. crt.sh
-            crtsh_findings = await _run_tool("crtsh", scan.target_domain, scan_id, session, publisher, thread_pool)
+            crtsh_findings = process_discovery_findings(
+                await _run_tool("crtsh", scan.target_domain, scan_id, session, publisher, thread_pool),
+                root_domain=scan.target_domain,
+            ).findings
             total_findings += await persist_findings(session, scan_id, crtsh_findings)
             for f in crtsh_findings:
                 ev = f.get("entity_value", "")
@@ -191,7 +196,10 @@ async def _run_pipeline(scan_id: str) -> dict:
                     all_subdomains.add(ev)
 
             # 1b. subfinder
-            subfinder_findings = await _run_tool("subfinder", scan.target_domain, scan_id, session, publisher, thread_pool)
+            subfinder_findings = process_discovery_findings(
+                await _run_tool("subfinder", scan.target_domain, scan_id, session, publisher, thread_pool),
+                root_domain=scan.target_domain,
+            ).findings
             total_findings += await persist_findings(session, scan_id, subfinder_findings)
             for f in subfinder_findings:
                 ev = f.get("entity_value", "")
@@ -199,10 +207,13 @@ async def _run_pipeline(scan_id: str) -> dict:
                     all_subdomains.add(ev)
 
             # 1c. theHarvester — search engine email/subdomain/IP harvest (free sources only)
-            theharvester_findings = await _run_tool(
-                "theharvester", scan.target_domain, scan_id, session, publisher, thread_pool,
-                collector_kwargs={"free_only": True},
-            )
+            theharvester_findings = process_discovery_findings(
+                await _run_tool(
+                    "theharvester", scan.target_domain, scan_id, session, publisher, thread_pool,
+                    collector_kwargs={"free_only": True},
+                ),
+                root_domain=scan.target_domain,
+            ).findings
             total_findings += await persist_findings(session, scan_id, theharvester_findings)
             for f in theharvester_findings:
                 etype = f.get("entity_type", "")
@@ -213,6 +224,31 @@ async def _run_pipeline(scan_id: str) -> dict:
                     resolved_ips.add(ev)
                 elif etype == "EMAIL" and "@" in ev:
                     theharvester_emails.add(ev)
+
+            # Common Crawl historical URLs and candidate subdomains.
+            common_crawl_findings = process_discovery_findings(
+                await _run_tool(
+                    "common_crawl", scan.target_domain, scan_id, session,
+                    publisher, thread_pool,
+                ),
+                root_domain=scan.target_domain,
+            ).findings
+            total_findings += await persist_findings(
+                session, scan_id, common_crawl_findings
+            )
+            for finding in common_crawl_findings:
+                if finding.get("entity_type") == "SUBDOMAIN":
+                    value = str(finding.get("entity_value", ""))
+                    if value:
+                        all_subdomains.add(value)
+
+            posture_findings = await _run_tool(
+                "dns_email_posture", scan.target_domain, scan_id, session,
+                publisher, thread_pool,
+            )
+            total_findings += await persist_findings(
+                session, scan_id, posture_findings
+            )
 
             # 1d. DNS resolution (bounded to 200 subdomains)
             from app.services.vectors.infrastructure import MAX_DNS_SUBDOMAINS, DNS_CONCURRENCY
@@ -243,12 +279,27 @@ async def _run_pipeline(scan_id: str) -> dict:
                 shodan_findings = await _run_tool("shodan_internetdb", ip, scan_id, session, publisher, thread_pool)
                 total_findings += await persist_findings(session, scan_id, shodan_findings)
 
-            # 1f. WhoIS / ASN Lookup on root domain and resolved IPs
-            whois_findings = await _run_tool("whois_lookup", scan.target_domain, scan_id, session, publisher, thread_pool)
-            total_findings += await persist_findings(session, scan_id, whois_findings)
-            for ip in sorted(resolved_ips):
-                asn_findings = await _run_tool("whois_lookup", ip, scan_id, session, publisher, thread_pool)
-                total_findings += await persist_findings(session, scan_id, asn_findings)
+            # 1f. Registration and routing enrichment via WHOIS, RDAP, and RIPEstat.
+            domain_registration = await asyncio.gather(
+                _run_tool("whois_lookup", scan.target_domain, scan_id, session, publisher, thread_pool),
+                _run_tool("rdap_lookup", scan.target_domain, scan_id, session, publisher, thread_pool),
+            )
+            for findings in domain_registration:
+                total_findings += await persist_findings(session, scan_id, findings)
+            for index, ip in enumerate(sorted(resolved_ips)):
+                collectors = [
+                    _run_tool("whois_lookup", ip, scan_id, session, publisher, thread_pool)
+                ]
+                if index < MAX_REGISTRY_IP_TARGETS:
+                    collectors.append(
+                        _run_tool("rdap_lookup", ip, scan_id, session, publisher, thread_pool)
+                    )
+                    collectors.append(
+                        _run_tool("ripestat", ip, scan_id, session, publisher, thread_pool)
+                    )
+                ip_registration = await asyncio.gather(*collectors)
+                for findings in ip_registration:
+                    total_findings += await persist_findings(session, scan_id, findings)
 
             await session.commit()
             phase_results["INFRASTRUCTURE"] = {

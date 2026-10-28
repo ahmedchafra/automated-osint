@@ -17,6 +17,7 @@ class Scan(BaseModel):
     celery_task_id = Column(String, nullable=True, index=True)
     selected_vectors = Column(JSON, nullable=False, default=list)
     target_usernames = Column(JSON, nullable=False, default=list)
+    scope_manifest = Column(JSON, nullable=False, default=dict, server_default="{}")
     completed_at = Column(DateTime(timezone=True), nullable=True)
     owner_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
     # Tracks last activity on the scan (enrichment tasks, pivots, etc.) so the
@@ -32,6 +33,10 @@ class Scan(BaseModel):
     findings = relationship("Finding", back_populates="scan", cascade="all, delete-orphan")
     jobs = relationship("ScanJob", back_populates="scan", cascade="all, delete-orphan")
     assets = relationship("Asset", back_populates="scan", cascade="all, delete-orphan")
+    asset_observations = relationship(
+        "AssetObservation", back_populates="scan", cascade="all, delete-orphan"
+    )
+    screenshots = relationship("ScreenshotEvidence", back_populates="scan", cascade="all, delete-orphan")
     owner = relationship("User", foreign_keys=[owner_id])
     collaborators = relationship("ScanCollaborator", back_populates="scan", cascade="all, delete-orphan")
 

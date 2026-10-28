@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { lazy, Suspense, useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -6,24 +6,42 @@ import {
   Globe, Server, Building2, Mail, Search, CheckCircle2, XCircle,
   Zap, ArrowRight, RotateCcw, Activity, Trash2, StopCircle,
   Download, FileSpreadsheet, Lock, Share2,
+  LayoutDashboard, ListFilter,
 } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import apiClient, { deleteScan, cancelScan, triggerOrgInfra } from '../api/client';
 import { openScanWebSocket } from '../api/ws';
-import { useScanWorkspace } from '../context/ScanWorkspaceContext';
-import { useAuth } from '../context/AuthContext';
-import { useNotification } from '../context/NotificationContext';
+import { useScanWorkspace } from '../context/scan-workspace-state';
+import { useAuth } from '../context/auth-state';
+import { useNotification } from '../context/notification-state';
 import type { ScanEvent } from '../api/ws';
-import type { AssetRecord, ScanJob, TabId, ScanWorkspaceState, ScanWorkspaceAction } from '../context/ScanWorkspaceContext';
+import type {
+  AssetRecord,
+  DomainDeepAnalysisProgress,
+  EmailDeepAnalysisProgress,
+  ScanJob,
+  TabId,
+  ScanWorkspaceState,
+  ScanWorkspaceAction,
+} from '../context/ScanWorkspaceContext';
 import ErrorBoundary from '../components/ErrorBoundary';
-import { InfrastructureTab } from '../components/workspace/InfrastructureTab';
-import { IdentityTab } from '../components/workspace/IdentityTab';
-import { ThreatIntelTab } from '../components/workspace/ThreatIntelTab';
-import { BrandProtectionTab } from '../components/workspace/BrandProtectionTab';
-import { SecretsTab } from '../components/workspace/SecretsTab';
-import { WebOsintTab } from '../components/workspace/WebOsintTab';
+import { WorkspaceOverview } from '../components/workspace/WorkspaceOverview';
+import { EvidenceExplorer } from '../components/workspace/EvidenceExplorer';
 import { PipelineProgress } from '../components/workspace/PipelineProgress';
 import CollaboratorModal from '../components/workspace/CollaboratorModal';
+import { errorMessage } from '../utils/errors';
+import { ENTITY_TYPES, SPECIALIST_TAB_TYPES } from '../domain/entityCatalog';
+import type { ScanFacets } from '../types/api';
+
+const EMPTY_SCAN_JOBS: ScanJob[] = [];
+const EMPTY_ASSETS: AssetRecord[] = [];
+
+const InfrastructureTab = lazy(() => import('../components/workspace/InfrastructureTab').then(module => ({ default: module.InfrastructureTab })));
+const IdentityTab = lazy(() => import('../components/workspace/IdentityTab').then(module => ({ default: module.IdentityTab })));
+const ThreatIntelTab = lazy(() => import('../components/workspace/ThreatIntelTab').then(module => ({ default: module.ThreatIntelTab })));
+const BrandProtectionTab = lazy(() => import('../components/workspace/BrandProtectionTab').then(module => ({ default: module.BrandProtectionTab })));
+const SecretsTab = lazy(() => import('../components/workspace/SecretsTab').then(module => ({ default: module.SecretsTab })));
+const WebOsintTab = lazy(() => import('../components/workspace/WebOsintTab').then(module => ({ default: module.WebOsintTab })));
 
 /* ─── Types ─────────────────────────────────────────────────────────── */
 
@@ -74,6 +92,7 @@ const JOB_LABELS: Record<string, string> = {
   telegram_monitor: 'Telegram monitor',
   run_ai_dork_task: 'AI search',
   active_validation: 'Active validation',
+  content_discovery: 'Content discovery',
 };
 
 function JobActivityPanel({ jobs }: { jobs: ScanJob[] }) {
@@ -151,40 +170,52 @@ type TabConfig = { id: TabId; label: string; icon: typeof Globe; entityTypes: st
 
 const TABS: TabConfig[] = [
   {
+    id: 'overview',
+    label: 'Overview',
+    icon: LayoutDashboard,
+    entityTypes: ENTITY_TYPES,
+  },
+  {
+    id: 'evidence',
+    label: 'All Evidence',
+    icon: ListFilter,
+    entityTypes: ENTITY_TYPES,
+  },
+  {
     id: 'infrastructure',
     label: 'Infrastructure',
     icon: Globe,
-    entityTypes: ['SUBDOMAIN', 'IP_ADDRESS', 'PORT_SERVICE', 'HOST_METADATA', 'DNS_RECORD', 'TLS_CERT', 'ASN_INFO', 'URL', 'DOMAIN_METADATA'],
+    entityTypes: SPECIALIST_TAB_TYPES.infrastructure,
   },
   {
     id: 'identity',
     label: 'Identity',
     icon: Mail,
-    entityTypes: ['EMAIL', 'BREACH', 'EMAIL_PLATFORM', 'PROFILE'],
+    entityTypes: SPECIALIST_TAB_TYPES.identity,
   },
   {
     id: 'web-osint',
     label: 'Web OSINT',
     icon: Globe,
-    entityTypes: ['TECHNOLOGY', 'HTTP_HEADER', 'HISTORICAL_URL', 'WAYBACK_SNAPSHOT', 'CVE', 'VULNERABILITY'],
+    entityTypes: SPECIALIST_TAB_TYPES['web-osint'],
   },
   {
     id: 'secrets',
     label: 'Secrets',
     icon: Search,
-    entityTypes: ['LEAKED_SECRET', 'GITHUB_REPO', 'CREDENTIAL'],
+    entityTypes: SPECIALIST_TAB_TYPES.secrets,
   },
   {
     id: 'threat-intel',
     label: 'Threat Intel',
     icon: Activity,
-    entityTypes: ['TELEGRAM_MESSAGE', 'TELEGRAM_CHANNEL', 'ONION_SITE', 'DARKWEB_MENTION'],
+    entityTypes: SPECIALIST_TAB_TYPES['threat-intel'],
   },
   {
     id: 'brand',
     label: 'Brand Protection',
     icon: Shield,
-    entityTypes: ['LOOKALIKE_DOMAIN', 'PHISHING_SITE', 'CLOUD_BUCKET', 'EXPOSED_FILE', 'DORK_RESULT'],
+    entityTypes: SPECIALIST_TAB_TYPES.brand,
   },
 ];
 
@@ -303,7 +334,7 @@ function PipelineView({ scanId, targetDomain, targetType = 'domain', onComplete 
     queryFn: async () => (await apiClient.get(`/scans/${scanId}`)).data,
     refetchInterval: 2_000,
   });
-  const { data: pipelineJobs = [] } = useQuery<ScanJob[]>({
+  const { data: pipelineJobs = EMPTY_SCAN_JOBS } = useQuery<ScanJob[]>({
     queryKey: ['scanJobs', scanId],
     queryFn: async () => (await apiClient.get(`/scans/${scanId}/jobs`)).data,
     refetchInterval: 2_000,
@@ -465,7 +496,9 @@ function PipelineView({ scanId, targetDomain, targetType = 'domain', onComplete 
           onClick={async () => {
             try {
               await cancelScan(scanId);
-            } catch (_) {}
+            } catch {
+              // Reloading below reconciles the UI even if cancellation already completed.
+            }
             wsRef.current?.close();
             window.location.reload();
           }}
@@ -513,7 +546,12 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
 }) {
   const { state, dispatch } = useScanWorkspace();
   const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState<TabId>('infrastructure');
+  const [activeTab, setActiveTab] = useState<TabId>('overview');
+  const { data: facets } = useQuery<ScanFacets>({
+    queryKey: ['scanFacets', scanId],
+    queryFn: async () => (await apiClient.get(`/scans/${scanId}/facets`)).data,
+    enabled: Boolean(scanId),
+  });
 
   // Compute per-tab counts from the TABS config (single source of truth).
   // Adding a new tab is a one-line change to TABS above; this memo picks
@@ -521,10 +559,12 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
   const tabCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const tab of TABS) {
-      counts[tab.id] = state.findings.filter(f => tab.entityTypes.includes(f.entity_type)).length;
+      counts[tab.id] = facets
+        ? tab.entityTypes.reduce((total, type) => total + (facets.findings_by_entity_type[type] ?? 0), 0)
+        : state.findings.filter(f => tab.entityTypes.includes(f.entity_type)).length;
     }
     return counts;
-  }, [state.findings]);
+  }, [facets, state.findings]);
 
   // Download report via AJAX (so auth headers are sent)
   const downloadReport = useCallback(async (format: 'csv' | 'json' | 'pdf') => {
@@ -571,7 +611,7 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
       : false,
   });
 
-  const { data: jobs = [] } = useQuery<ScanJob[]>({
+  const { data: jobs = EMPTY_SCAN_JOBS } = useQuery<ScanJob[]>({
     queryKey: ['scanJobs', scanId],
     queryFn: async () => (await apiClient.get(`/scans/${scanId}/jobs`)).data,
     enabled: !!scanId,
@@ -581,7 +621,7 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
     },
   });
 
-  const { data: assets = [] } = useQuery<AssetRecord[]>({
+  const { data: assets = EMPTY_ASSETS } = useQuery<AssetRecord[]>({
     queryKey: ['scanAssets', scanId],
     queryFn: async () => (await apiClient.get(`/scans/${scanId}/assets`)).data,
     enabled: !!scanId,
@@ -634,6 +674,7 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
       queryClient.invalidateQueries({ queryKey: ['scanFindings', scanId] });
       queryClient.invalidateQueries({ queryKey: ['scanWorkspace', scanId] });
       queryClient.invalidateQueries({ queryKey: ['scanAssets', scanId] });
+      queryClient.invalidateQueries({ queryKey: ['scanFacets', scanId] });
     }
   }, [jobs, scanId, dispatch, queryClient]);
 
@@ -646,21 +687,24 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
       switch (event.event) {
         // Email deep analysis progress
         case 'email_deep_analysis_progress':
-          dispatch({ type: 'EMAIL_DEEP_ANALYSIS_PROGRESS', payload: event });
+          dispatch({ type: 'EMAIL_DEEP_ANALYSIS_PROGRESS', payload: event as unknown as EmailDeepAnalysisProgress });
           break;
         case 'email_deep_analysis_completed':
           dispatch({ type: 'EMAIL_DEEP_ANALYSIS_COMPLETED', payload: event });
           break;
         // Breach check progress
         case 'breach_check_progress':
-          dispatch({ type: 'BREACH_CHECK_PROGRESS', payload: event });
+          dispatch({
+            type: 'BREACH_CHECK_PROGRESS',
+            payload: event as unknown as { email: string; index: number; total: number; status: string; found?: number },
+          });
           break;
         case 'breach_check_completed':
           dispatch({ type: 'BREACH_CHECK_COMPLETED', payload: event });
           break;
         // Domain deep analysis progress
         case 'domain_deep_analysis_progress':
-          dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_PROGRESS', payload: event });
+          dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_PROGRESS', payload: event as unknown as DomainDeepAnalysisProgress });
           break;
         case 'domain_deep_analysis_completed':
           dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_COMPLETED', payload: event });
@@ -712,13 +756,15 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
 
   const renderTab = () => {
     switch (activeTab) {
+      case 'overview': return <WorkspaceOverview onNavigate={setActiveTab} canEditScope={!isReadOnly} />;
+      case 'evidence': return <EvidenceExplorer />;
       case 'infrastructure': return <InfrastructureTab />;
       case 'identity': return <IdentityTab />;
-      case 'secrets': return <SecretsTab />;
+      case 'secrets': return <SecretsTab canModify={!isReadOnly} />;
       case 'threat-intel': return <ThreatIntelTab />;
       case 'brand': return <BrandProtectionTab />;
       case 'web-osint': return <WebOsintTab />;
-      default: return <InfrastructureTab />;
+      default: return <WorkspaceOverview onNavigate={setActiveTab} canEditScope={!isReadOnly} />;
     }
   };
 
@@ -736,28 +782,33 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
     >
-      <div className="results-hero">
-        <motion.div
-          initial={{ scale: 0 }}
-          animate={{ scale: 1 }}
-          transition={{ type: 'spring', stiffness: 200 }}
-        >
-          <CheckCircle2 size={48} style={{ color: '#10b981' }} />
-        </motion.div>
-        <h1>Reconnaissance Complete</h1>
-        <p className="results-subtitle">
-          {state.findings.length} of {result.total_findings} findings loaded · {result.links_created} correlations mapped
-        </p>
-        {targetDomain && (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 8 }}>
-            {(() => { const Icon = TARGET_TYPE_ICONS[targetType] || Globe; return <Icon size={14} style={{ opacity: 0.6 }} />; })()}
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-sm)', color: 'var(--text-muted)' }}>
-              {targetDomain}
-            </span>
-            <span className="pipeline-type-badge">{TARGET_TYPE_LABELS[targetType] || targetType}</span>
+      <header className="workspace-header">
+        <div className="workspace-header-main">
+          <div className="workspace-target-icon">
+            {(() => { const Icon = TARGET_TYPE_ICONS[targetType] || Globe; return <Icon size={20} />; })()}
           </div>
-        )}
-      </div>
+          <div>
+            <div className="workspace-title-row">
+              <h1>{targetDomain || 'Scan workspace'}</h1>
+              <span className={`workspace-status workspace-status-${String(state.scan?.status || result.status).toLowerCase()}`}>
+                {state.scan?.status || result.status}
+              </span>
+            </div>
+            <p>
+              {TARGET_TYPE_LABELS[targetType] || targetType} investigation
+              <span aria-hidden="true"> · </span>
+              <span className="workspace-mode">{state.scan?.scan_mode || 'validated'} mode</span>
+              <span aria-hidden="true"> · </span>
+              {state.wsConnected ? 'live updates connected' : 'periodic updates'}
+            </p>
+          </div>
+        </div>
+        <div className="workspace-header-stats">
+          <span><strong>{Number(facets?.findings_total ?? state.scan?.findings_count ?? result.total_findings ?? state.findings.length).toLocaleString()}</strong> evidence</span>
+          <span><strong>{Number(facets?.assets_total ?? state.assets.length).toLocaleString()}</strong> assets</span>
+          <span><strong>{Number(state.scan?.links_count ?? result.links_created ?? 0).toLocaleString()}</strong> links</span>
+        </div>
+      </header>
 
       {/* Read-only banner for collaborators */}
       {isReadOnly && (
@@ -817,7 +868,9 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
 
       {/* Tab content */}
       <div className="ws-tab-content">
-        {renderTab()}
+        <Suspense fallback={<div className="workspace-empty workspace-tab-loading"><Loader2 size={18} className="animate-spin" />Loading investigation view…</div>}>
+          {renderTab()}
+        </Suspense>
       </div>
 
       <div style={{ marginTop: 24, display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>
@@ -874,7 +927,9 @@ function ResultsViewWithTabs({ scanId, result, targetDomain, targetType = 'domai
             onClick={async () => {
               try {
                 await cancelScan(scanId);
-              } catch (_) {}
+              } catch {
+                // Reloading below reconciles the UI even if cancellation already completed.
+              }
               window.location.reload();
             }}
             style={{ padding: '10px 16px', fontSize: 'var(--text-sm)', color: '#fb923c', borderColor: 'rgba(251,146,60,0.3)' }}
@@ -924,8 +979,8 @@ function DiscoveredDomainsCard({
   const discoveredDomains = useMemo(() => {
     const list = state.findings.filter(f => f.entity_type === 'DOMAIN_METADATA');
     return [...list].sort((a, b) => {
-      const scoreA = (a.normalized_data as any)?.score ?? 0;
-      const scoreB = (b.normalized_data as any)?.score ?? 0;
+      const scoreA = Number(a.normalized_data?.score ?? 0);
+      const scoreB = Number(b.normalized_data?.score ?? 0);
       return scoreB - scoreA;
     });
   }, [state.findings]);
@@ -955,9 +1010,8 @@ function DiscoveredDomainsCard({
           message: `Running infrastructure, services, identity, and search on ${domain}`,
         });
       }
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || 'Failed to start infrastructure scan.';
-      setInfraError(detail);
+    } catch (err: unknown) {
+      setInfraError(errorMessage(err, 'Failed to start infrastructure scan.'));
     } finally {
       setInfraRunning(null);
     }
@@ -1030,7 +1084,7 @@ function DiscoveredDomainsCard({
         <div style={{ padding: '0 16px 12px', display: 'flex', flexDirection: 'column', gap: 4 }}>
           {discoveredDomains.map(f => {
             const isActive = activeEnrichmentDomain === f.entity_value;
-            const score = (f.normalized_data as any)?.score ?? 0;
+            const score = Number(f.normalized_data?.score ?? 0);
             const bg = isActive ? 'rgba(6,182,212,0.08)' : 'transparent';
             const border = isActive ? '1px solid rgba(6,182,212,0.2)' : '1px solid transparent';
             return (
@@ -1210,9 +1264,8 @@ export default function ScanWorkspace() {
     try {
       await deleteScan(scanId);
       navigate('/scans');
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || 'Failed to delete scan.';
-      window.alert(`Error: ${detail}`);
+    } catch (err: unknown) {
+      window.alert(`Error: ${errorMessage(err, 'Failed to delete scan.')}`);
     }
   }, [scanId, navigate]);
 

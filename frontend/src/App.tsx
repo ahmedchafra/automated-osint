@@ -1,29 +1,39 @@
+import { lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Activity, LayoutDashboard, PlusCircle, Search, Zap, Radio, ChevronRight, Shield, Sliders } from 'lucide-react';
-import Dashboard from './pages/Dashboard';
-import NewScan from './pages/NewScan';
-import ScanHistory from './pages/ScanHistory';
-import ScanWorkspace from './pages/ScanWorkspace';
-import ScanDetails from './pages/ScanDetails';
-import Settings from './pages/Settings';
-import AIAssistant from './pages/AIAssistant';
-import EntityGraph from './pages/EntityGraph';
-import Login from './pages/Login';
-import Register from './pages/Register';
-import AdminUsers from './pages/AdminUsers';
+import { Activity, LayoutDashboard, PlusCircle, Search, Zap, Radio, Shield, Sliders } from 'lucide-react';
 import ProtectedRoute from './components/ProtectedRoute';
 import AdminRoute from './components/AdminRoute';
 import { ScanWorkspaceProvider } from './context/ScanWorkspaceContext';
 import { AuthProvider } from './context/AuthContext';
 import { NotificationProvider } from './context/NotificationContext';
 import { NotificationToast } from './components/NotificationToast';
-import { useAuth } from './context/AuthContext';
+import { useAuth, type User } from './context/auth-state';
 
 const queryClient = new QueryClient();
 
-function Sidebar({ user, onLogout }: { user?: any; onLogout?: () => void }) {
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const NewScan = lazy(() => import('./pages/NewScan'));
+const ScanHistory = lazy(() => import('./pages/ScanHistory'));
+const ScanWorkspace = lazy(() => import('./pages/ScanWorkspace'));
+const ScanDetails = lazy(() => import('./pages/ScanDetails'));
+const Settings = lazy(() => import('./pages/Settings'));
+const AIAssistant = lazy(() => import('./pages/AIAssistant'));
+const EntityGraph = lazy(() => import('./pages/EntityGraph'));
+const Login = lazy(() => import('./pages/Login'));
+const Register = lazy(() => import('./pages/Register'));
+const AdminUsers = lazy(() => import('./pages/AdminUsers'));
+
+function RouteFallback() {
+  return (
+    <div style={{ minHeight: '40vh', display: 'grid', placeItems: 'center' }}>
+      <Activity className="spin" size={24} style={{ color: 'var(--accent)' }} />
+    </div>
+  );
+}
+
+function Sidebar({ user, onLogout }: { user?: User | null; onLogout?: () => void }) {
   const location = useLocation();
   const navItems = [
     { to: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -45,15 +55,13 @@ function Sidebar({ user, onLogout }: { user?: any; onLogout?: () => void }) {
       className="sidebar"
     >
       <div className="sidebar-header">
-        <div style={{
-          width: 28, height: 28, borderRadius: 6,
-          background: 'linear-gradient(135deg, var(--accent), #0891b2)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          boxShadow: '0 0 12px rgba(6,182,212,0.25)'
-        }}>
-          <Radio size={14} color="#fff" />
+        <div className="brand-mark">
+          <Radio size={15} />
         </div>
-        <span>OWL<span style={{ color: '#71717a', fontWeight: 400, marginLeft: 4 }}>OSINT</span></span>
+        <div className="brand-copy">
+          <strong>OWL OSINT</strong>
+          <span>Investigation platform</span>
+        </div>
       </div>
       <nav className="sidebar-nav">
         {navItems.map(({ to, label, icon: Icon }) => {
@@ -72,38 +80,26 @@ function Sidebar({ user, onLogout }: { user?: any; onLogout?: () => void }) {
           );
         })}
       </nav>
-      <div style={{ marginTop: 'auto', padding: '0.75rem 1rem', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+      <div className="sidebar-account">
         {user ? (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-              <span className="ws-pulse ws-pulse-online" />
-              <span style={{
-                fontSize: 11, color: '#a1a1aa', fontFamily: 'JetBrains Mono, monospace',
-                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-              }}>
-                {user.username}
-              </span>
+          <div className="account-row">
+            <div className="account-avatar">{user.username.slice(0, 1).toUpperCase()}</div>
+            <div className="account-copy">
+              <strong>{user.username}</strong>
+              <span>{user.role}</span>
             </div>
             <button
               onClick={onLogout}
               title="Sign out"
-              style={{
-                background: 'none', border: 'none', cursor: 'pointer',
-                color: '#71717a', padding: '2px 6px', borderRadius: 4,
-                fontSize: 11, fontFamily: 'JetBrains Mono, monospace',
-              }}
-              onMouseEnter={(e) => (e.currentTarget.style.color = '#f43f5e')}
-              onMouseLeave={(e) => (e.currentTarget.style.color = '#71717a')}
+              className="account-logout"
             >
-              logout
+              Sign out
             </button>
           </div>
         ) : (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div className="account-row">
             <span className="ws-pulse ws-pulse-online" />
-            <span style={{ fontSize: 11, color: '#71717a', fontFamily: 'JetBrains Mono, monospace' }}>
-              SYSTEM ONLINE
-            </span>
+            <span>Development environment</span>
           </div>
         )}
       </div>
@@ -112,27 +108,28 @@ function Sidebar({ user, onLogout }: { user?: any; onLogout?: () => void }) {
 }
 
 function Topbar() {
+  const location = useLocation();
+  const pathname = location.pathname;
+  const title = pathname === '/' ? 'Dashboard'
+    : pathname === '/scans/new' ? 'New investigation'
+      : pathname === '/scans' ? 'Scan history'
+        : pathname.includes('/details') ? 'Scan details'
+          : pathname.startsWith('/scans/') ? 'Investigation workspace'
+            : pathname.startsWith('/assistant') ? 'AI assistant'
+              : pathname.startsWith('/graph') ? 'Entity graph'
+                : pathname.startsWith('/settings') ? 'Settings'
+                  : pathname.startsWith('/admin') ? 'Administration'
+                    : 'OWL OSINT';
+
   return (
     <header className="topbar">
-      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-        <ChevronRight size={14} color="var(--text-muted)" />
-        <span style={{ fontSize: '0.8125rem', color: '#71717a', fontFamily: 'JetBrains Mono, monospace' }}>
-          COMMAND CENTER v2.0
-        </span>
+      <div className="topbar-title">
+        <span>Workspace</span>
+        <strong>{title}</strong>
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span className="ws-pulse ws-pulse-online" />
-          <span style={{ fontSize: 11, color: '#10b981', fontFamily: 'JetBrains Mono, monospace' }}>LIVE</span>
-        </div>
-        <span style={{
-          padding: '3px 10px', borderRadius: 'var(--radius-full)',
-          background: 'rgba(6,182,212,0.10)', border: '1px solid rgba(6,182,212,0.2)',
-          color: '#06b6d4', fontSize: 11, fontFamily: 'JetBrains Mono, monospace',
-          letterSpacing: '0.06em'
-        }}>
-          LOW-IMPACT MODE
-        </span>
+      <div className="topbar-environment">
+        <span className="environment-dot" />
+        <span>Development</span>
       </div>
     </header>
   );
@@ -173,28 +170,30 @@ function Layout({ children }: { children: React.ReactNode }) {
 function AppRoutes() {
   return (
     <Layout>
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="/register" element={<Register />} />
-        <Route path="/" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
-        <Route path="/scans/new" element={<ProtectedRoute><NewScan /></ProtectedRoute>} />
-        <Route path="/scans" element={<ProtectedRoute><ScanHistory /></ProtectedRoute>} />
-        <Route path="/scans/:id" element={
-          <ProtectedRoute>
-            <ScanWorkspaceProvider>
-              <ScanWorkspace />
-            </ScanWorkspaceProvider>
-          </ProtectedRoute>
-        } />
-        <Route path="/scans/:id/details" element={<ProtectedRoute><ScanDetails /></ProtectedRoute>} />
-        <Route path="/assistant" element={<ProtectedRoute><AIAssistant /></ProtectedRoute>} />
-        <Route path="/assistant/:scanId" element={<ProtectedRoute><AIAssistant /></ProtectedRoute>} />
-        <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
-        <Route path="/graph" element={<ProtectedRoute><EntityGraph /></ProtectedRoute>} />
-        <Route path="/graph/:scanId" element={<ProtectedRoute><EntityGraph /></ProtectedRoute>} />
-        <Route path="/admin/users" element={<AdminRoute><AdminUsers /></AdminRoute>} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      <Suspense fallback={<RouteFallback />}>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
+          <Route path="/" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+          <Route path="/scans/new" element={<ProtectedRoute><NewScan /></ProtectedRoute>} />
+          <Route path="/scans" element={<ProtectedRoute><ScanHistory /></ProtectedRoute>} />
+          <Route path="/scans/:id" element={
+            <ProtectedRoute>
+              <ScanWorkspaceProvider>
+                <ScanWorkspace />
+              </ScanWorkspaceProvider>
+            </ProtectedRoute>
+          } />
+          <Route path="/scans/:id/details" element={<ProtectedRoute><ScanDetails /></ProtectedRoute>} />
+          <Route path="/assistant" element={<ProtectedRoute><AIAssistant /></ProtectedRoute>} />
+          <Route path="/assistant/:scanId" element={<ProtectedRoute><AIAssistant /></ProtectedRoute>} />
+          <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
+          <Route path="/graph" element={<ProtectedRoute><EntityGraph /></ProtectedRoute>} />
+          <Route path="/graph/:scanId" element={<ProtectedRoute><EntityGraph /></ProtectedRoute>} />
+          <Route path="/admin/users" element={<AdminRoute><AdminUsers /></AdminRoute>} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </Suspense>
     </Layout>
   );
 }

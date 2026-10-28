@@ -175,8 +175,8 @@ function ScanDetails() {
         wsRef.current.close();
         wsRef.current = null;
       }
-      setWsConnected(false);
-      return;
+      const timer = window.setTimeout(() => setWsConnected(false), 0);
+      return () => window.clearTimeout(timer);
     }
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
 

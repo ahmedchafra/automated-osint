@@ -10,23 +10,34 @@ from __future__ import annotations
 import logging
 import uuid
 
-from fastapi import Request, status
+from fastapi import Request, WebSocket, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger("osint.errors")
 
 
-def _request_id(request: Request) -> str:
-    return request.headers.get("X-Request-ID") or uuid.uuid4().hex
+def _request_id(connection: Request | WebSocket) -> str:
+    return connection.headers.get("X-Request-ID") or uuid.uuid4().hex
 
 
-async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
+def _log_context(connection: Request | WebSocket, request_id: str) -> dict[str, str]:
+    return {
+        "request_id": request_id,
+        "path": connection.url.path,
+        "method": getattr(connection, "method", "WEBSOCKET"),
+    }
+
+
+async def sqlalchemy_exception_handler(request: Request | WebSocket, exc: SQLAlchemyError):
     rid = _request_id(request)
     logger.exception(
         "database error",
-        extra={"request_id": rid, "path": request.url.path, "method": request.method},
+        extra=_log_context(request, rid),
     )
+    if isinstance(request, WebSocket):
+        await request.close(code=1011, reason=f"Database error (request {rid})")
+        return None
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={
@@ -37,12 +48,15 @@ async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
     )
 
 
-async def generic_exception_handler(request: Request, exc: Exception):
+async def generic_exception_handler(request: Request | WebSocket, exc: Exception):
     rid = _request_id(request)
     logger.exception(
         "unhandled exception",
-        extra={"request_id": rid, "path": request.url.path, "method": request.method},
+        extra=_log_context(request, rid),
     )
+    if isinstance(request, WebSocket):
+        await request.close(code=1011, reason=f"Internal error (request {rid})")
+        return None
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={

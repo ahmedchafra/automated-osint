@@ -58,8 +58,24 @@ class SubfinderCollector(BaseCollector):
 
             # Parse JSON lines — subfinder -json outputs one JSON obj per line
             output = result.stdout.decode(errors="ignore")
-            results: list[dict] = []
-            seen: set[str] = set()
+            results_by_host: dict[str, dict] = {}
+
+            def record_host(host: str, source: str, input_value: str) -> None:
+                existing = results_by_host.get(host)
+                if existing is None:
+                    results_by_host[host] = {
+                        "type": "SUBDOMAIN",
+                        "value": host,
+                        "source": source,
+                        "sources": [source] if source else [],
+                        "input": input_value,
+                    }
+                    return
+                sources = set(existing.get("sources", []))
+                if source:
+                    sources.add(source)
+                existing["sources"] = sorted(sources)
+
             for line in output.splitlines():
                 line = line.strip()
                 if not line:
@@ -68,29 +84,20 @@ class SubfinderCollector(BaseCollector):
                     obj = json.loads(line)
                     host = obj.get("host", "").strip().lower()
                     if host and host.endswith(target):
-                        if host not in seen:
-                            seen.add(host)
-                            results.append({
-                                "type": "SUBDOMAIN",
-                                "value": host,
-                                "source": obj.get("source", "unknown"),
-                                "input": obj.get("input", target),
-                            })
+                        record_host(
+                            host,
+                            str(obj.get("source", "unknown")),
+                            str(obj.get("input", target)),
+                        )
                 except json.JSONDecodeError:
                     # If not JSON, maybe it's plain text fallback
                     # Some versions output plain text; try to treat line as host
                     possible = line.strip().lower()
-                    if possible and possible.endswith(target) and possible not in seen:
-                        seen.add(possible)
-                        results.append({
-                            "type": "SUBDOMAIN",
-                            "value": possible,
-                            "source": "unknown",
-                            "input": target,
-                        })
+                    if possible and possible.endswith(target):
+                        record_host(possible, "unknown", target)
                     continue
 
-            return results
+            return list(results_by_host.values())
 
         except FileNotFoundError:
             print("[subfinder] subfinder binary not found")
@@ -112,6 +119,7 @@ class SubfinderCollector(BaseCollector):
                 "source": "subfinder",
                 "subdomain": raw.get("value", ""),
                 "discovery_source": raw.get("source", "unknown"),  # which subfinder source found it
+                "provider_sources": raw.get("sources", []),
                 "input": raw.get("input", ""),
             },
         }

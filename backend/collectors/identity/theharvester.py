@@ -751,7 +751,7 @@ class TheHarvesterCollector(BaseCollector):
         """
         import ipaddress
 
-        seen: set[tuple[str, str]] = set()
+        by_key: dict[tuple[str, str], Dict[str, Any]] = {}
         merged: List[Dict[str, Any]] = []
         counts: dict[str, int] = {}
         caps = {
@@ -765,10 +765,12 @@ class TheHarvesterCollector(BaseCollector):
 
         for results in result_lists:
             for item in results:
-                key = (item.get("kind", ""), item.get("value", ""))
-                if not key[0] or not key[1]:
+                raw_kind = item.get("kind", "")
+                raw_value = item.get("value", "")
+                if not raw_kind or not raw_value:
                     continue
-                kind, value = key[0], str(key[1]).strip().lower()
+                kind, value = str(raw_kind), str(raw_value).strip().lower()
+                key = (kind, value)
                 if kind == "subdomain":
                     if value.startswith("*.") or not value.endswith("." + root):
                         continue
@@ -786,12 +788,22 @@ class TheHarvesterCollector(BaseCollector):
                             continue
                     except ValueError:
                         continue
+                existing = by_key.get(key)
+                if existing is not None:
+                    sections = set(existing.get("source_sections", []))
+                    for section in (existing.get("source_section"), item.get("source_section")):
+                        if section:
+                            sections.add(str(section))
+                    if sections:
+                        existing["source_sections"] = sorted(sections)
+                    continue
                 if counts.get(kind, 0) >= caps.get(kind, 1000):
                     continue
-                if key not in seen:
-                    seen.add(key)
-                    merged.append(item)
-                    counts[kind] = counts.get(kind, 0) + 1
+                normalized_item = dict(item)
+                normalized_item["value"] = value
+                by_key[key] = normalized_item
+                merged.append(normalized_item)
+                counts[kind] = counts.get(kind, 0) + 1
 
         return merged
 
@@ -800,6 +812,7 @@ class TheHarvesterCollector(BaseCollector):
         kind = raw.get("kind", "email")
         value = raw.get("value", "")
         section = raw.get("source_section", "")
+        sections = raw.get("source_sections", [])
         domain = raw.get("domain", "")
 
         if kind == "email":
@@ -813,6 +826,7 @@ class TheHarvesterCollector(BaseCollector):
                     "domain": domain,
                     "source": "theharvester",
                     "source_section": section,
+                    "provider_sources": sections or ([section] if section else []),
                 },
             }
 
@@ -827,6 +841,7 @@ class TheHarvesterCollector(BaseCollector):
                     "parent_domain": domain,
                     "source": "theharvester",
                     "source_section": section,
+                    "provider_sources": sections or ([section] if section else []),
                 },
             }
 
@@ -841,6 +856,7 @@ class TheHarvesterCollector(BaseCollector):
                     "domain": domain,
                     "source": "theharvester",
                     "source_section": section,
+                    "provider_sources": sections or ([section] if section else []),
                 },
             }
 

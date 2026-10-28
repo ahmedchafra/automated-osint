@@ -11,12 +11,12 @@ from __future__ import annotations
 import asyncio
 
 from celery.exceptions import SoftTimeLimitExceeded
-from sqlalchemy import select
-
 from app.database import AsyncSessionLocal
-from app.models.finding import Finding
 from app.models.scan import Scan
 from app.services.progress import ScanProgressPublisher
+from app.services.discovery import process_discovery_findings
+from app.services.finding_contract import prepare_finding
+from app.services.finding_service import upsert_finding
 from collectors.registry import registry
 
 
@@ -75,45 +75,29 @@ async def run_collector_for_scan(
         None, _run_collector_in_loop, collector_name, target, collector_kwargs or {}
     )
 
+    if collector_name in {"crtsh", "subfinder", "theharvester", "common_crawl"}:
+        normalized_findings = process_discovery_findings(
+            normalized_findings,
+            root_domain=target,
+        ).findings
+
     if not normalized_findings:
         return []
 
     persisted: list[dict] = []
     for normalized in normalized_findings:
-        entity_value = normalized.get("entity_value")
-        if not entity_value:
-            continue
+        safe = prepare_finding(normalized, default_source=collector_name)
 
-        source_module = normalized.get("source_module", collector_name)
-        entity_type = normalized.get("entity_type", "")
-
-        existing = await db.execute(
-            select(Finding).where(
-                Finding.scan_id == scan_id,
-                Finding.entity_type == entity_type,
-                Finding.entity_value == entity_value,
-                Finding.source_module == source_module,
-            )
+        _, created, _ = await upsert_finding(
+            db,
+            scan_id,
+            safe,
+            observed_for=target,
         )
-        if existing.scalar_one_or_none():
-            continue
+        if created:
+            persisted.append(normalized)
 
-        finding = Finding(
-            scan_id=scan_id,
-            vector_type=normalized.get("vector_type", "IDENTITY"),
-            entity_type=entity_type,
-            entity_value=entity_value,
-            severity=normalized.get("severity", "LOW"),
-            confidence=normalized.get("confidence", 0.5),
-            source_module=source_module,
-            raw_data=normalized.get("raw_data", {}),
-            normalized_data=normalized.get("normalized_data", {}),
-            tags=normalized.get("tags", []),
-        )
-        db.add(finding)
-        persisted.append(normalized)
-
-    if persisted:
+    if normalized_findings:
         await db.flush()
 
     return persisted
@@ -188,8 +172,9 @@ async def persist_findings(
     default_vector: str = "INFRASTRUCTURE",
     default_severity: str = "INFO",
     default_confidence: float = 0.5,
+    observed_for: str | None = None,
 ) -> int:
-    """Persist normalized findings, skipping duplicates. Returns count of new rows.
+    """Persist normalized findings, refreshing duplicates. Returns new-row count.
 
     Dedup key: (scan_id, entity_type, entity_value, source_module).
     This is the canonical persist function — kept here so every task file
@@ -197,44 +182,23 @@ async def persist_findings(
     """
     new_count = 0
     for finding in findings:
-        entity_value = finding.get("entity_value")
-        if not entity_value:
-            continue
-        if isinstance(entity_value, dict):
-            entity_value = str(entity_value.get("sha256", entity_value.get("value", str(entity_value))))
-        if not isinstance(entity_value, str):
-            entity_value = str(entity_value)
-
-        source_module = finding.get("source_module", "")
-        entity_type = finding.get("entity_type", "")
-
-        result = await db.execute(
-            select(Finding).where(
-                Finding.scan_id == scan_id,
-                Finding.entity_type == entity_type,
-                Finding.entity_value == entity_value,
-                Finding.source_module == source_module,
-            )
+        safe = prepare_finding(
+            finding,
+            default_vector=default_vector,
+            default_severity=default_severity,
+            default_confidence=default_confidence,
         )
-        if result.scalar_one_or_none():
-            continue
 
-        db_finding = Finding(
-            scan_id=scan_id,
-            vector_type=finding.get("vector_type", default_vector),
-            entity_type=entity_type,
-            entity_value=entity_value,
-            severity=finding.get("severity", default_severity),
-            confidence=finding.get("confidence", default_confidence),
-            source_module=source_module,
-            raw_data=finding.get("raw_data", {}),
-            normalized_data=finding.get("normalized_data", {}),
-            tags=finding.get("tags", []),
+        _, created, _ = await upsert_finding(
+            db,
+            scan_id,
+            safe,
+            observed_for=observed_for,
         )
-        db.add(db_finding)
-        new_count += 1
+        if created:
+            new_count += 1
 
-    if new_count:
+    if findings:
         await db.flush()
 
     return new_count

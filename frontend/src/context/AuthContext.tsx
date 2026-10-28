@@ -1,30 +1,10 @@
-import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
+import { useState, useEffect, useCallback, type ReactNode } from 'react';
 import apiClient from '../api/client';
+import { AuthStateContext, type User } from './auth-state';
 
 /* ── Types ─────────────────────────────────────────────────────────── */
 
-export interface User {
-  id: string;
-  username: string;
-  email: string;
-  role: string;
-  is_active: boolean;
-  created_at: string;
-}
-
-interface AuthState {
-  user: User | null;
-  token: string | null;
-  isLoading: boolean;
-  isAuthenticated: boolean;
-  login: (username: string, password: string) => Promise<void>;
-  register: (username: string, email: string, password: string) => Promise<void>;
-  logout: () => void;
-}
-
 /* ── Context ───────────────────────────────────────────────────────── */
-
-const AuthContext = createContext<AuthState | undefined>(undefined);
 
 const TOKEN_KEY = 'owl_osint_token';
 
@@ -33,16 +13,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(() =>
     localStorage.getItem(TOKEN_KEY)
   );
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(() => Boolean(localStorage.getItem(TOKEN_KEY)));
 
   /* On mount, validate existing token via /auth/me */
   useEffect(() => {
     let cancelled = false;
     const saved = localStorage.getItem(TOKEN_KEY);
-    if (!saved) {
-      setIsLoading(false);
-      return;
-    }
+    if (!saved) return;
 
     apiClient
       .get('/auth/me', {
@@ -95,7 +72,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider
+    <AuthStateContext.Provider
       value={{
         user,
         token,
@@ -107,12 +84,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }}
     >
       {children}
-    </AuthContext.Provider>
+    </AuthStateContext.Provider>
   );
-}
-
-export function useAuth() {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error('useAuth must be used within AuthProvider');
-  return ctx;
 }

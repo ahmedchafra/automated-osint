@@ -76,6 +76,56 @@ class SchemaBase(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ScopeManifestInput(BaseModel):
+    """Explicit boundaries for collectors that directly contact infrastructure."""
+
+    allowed_domains: List[str] = Field(default_factory=list, max_length=100)
+    allowed_cidrs: List[str] = Field(default_factory=list, max_length=100)
+    excluded_domains: List[str] = Field(default_factory=list, max_length=100)
+    excluded_cidrs: List[str] = Field(default_factory=list, max_length=100)
+    excluded_url_paths: List[str] = Field(default_factory=list, max_length=100)
+    allowed_ports: List[int] = Field(default_factory=list, max_length=100)
+    allow_subdomains: bool = True
+    allow_resolved_ips: bool = True
+
+    @field_validator("allowed_domains", "excluded_domains")
+    @classmethod
+    def _validate_domains(cls, values: List[str]) -> List[str]:
+        return sorted({_clean_domain(value, "scope domain") for value in values})
+
+    @field_validator("allowed_cidrs", "excluded_cidrs")
+    @classmethod
+    def _validate_cidrs(cls, values: List[str]) -> List[str]:
+        cleaned: set[str] = set()
+        for value in values:
+            try:
+                network = ipaddress.ip_network(value.strip(), strict=False)
+            except ValueError as exc:
+                raise ValueError(f"invalid scope CIDR: {value}") from exc
+            if not network.network_address.is_global or not network.broadcast_address.is_global:
+                raise ValueError(f"scope CIDR must be fully public: {value}")
+            cleaned.add(str(network))
+        return sorted(cleaned)
+
+    @field_validator("excluded_url_paths")
+    @classmethod
+    def _validate_paths(cls, values: List[str]) -> List[str]:
+        cleaned: set[str] = set()
+        for value in values:
+            candidate = value.strip()
+            if not candidate.startswith("/") or any(ord(char) < 32 for char in candidate):
+                raise ValueError("excluded URL paths must start with '/' and contain no control characters")
+            cleaned.add(candidate)
+        return sorted(cleaned)
+
+    @field_validator("allowed_ports")
+    @classmethod
+    def _validate_ports(cls, values: List[int]) -> List[int]:
+        if any(port < 1 or port > 65535 for port in values):
+            raise ValueError("allowed ports must be between 1 and 65535")
+        return sorted(set(values))
+
+
 class ScanCreateSimple(BaseModel):
     """Simplified scan creation — just a domain, runs all vectors automatically."""
     target_domain: str = Field(
@@ -88,6 +138,7 @@ class ScanCreateSimple(BaseModel):
         default=ScanMode.VALIDATED,
         description="Interaction profile: passive, validated, or active",
     )
+    scope_manifest: Optional[ScopeManifestInput] = None
 
     @field_validator("target_domain")
     @classmethod
@@ -113,6 +164,7 @@ class ScanCreate(BaseModel):
         description="Optional list of usernames for the USERNAME vector",
     )
     scan_mode: ScanMode = Field(default=ScanMode.VALIDATED)
+    scope_manifest: Optional[ScopeManifestInput] = None
 
     @field_validator("target_domain")
     @classmethod
@@ -178,6 +230,7 @@ class ScanCreateV2(BaseModel):
         description="Optional list of usernames for the USERNAME vector",
     )
     scan_mode: ScanMode = Field(default=ScanMode.VALIDATED)
+    scope_manifest: Optional[ScopeManifestInput] = None
 
     @model_validator(mode="after")
     def _validate_target(self) -> "ScanCreateV2":
@@ -226,6 +279,7 @@ class ScanResponse(SchemaBase):
     celery_task_id: Optional[str] = None
     selected_vectors: List[VectorType]
     target_usernames: List[str]
+    scope_manifest: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     completed_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -257,6 +311,22 @@ class ScanJobResponse(SchemaBase):
     updated_at: datetime
 
 
+class ScanFacetsResponse(SchemaBase):
+    """Exact database-backed aggregates for the investigation workspace."""
+
+    findings_total: int = 0
+    findings_by_entity_type: Dict[str, int] = Field(default_factory=dict)
+    findings_by_severity: Dict[str, int] = Field(default_factory=dict)
+    findings_by_source: Dict[str, int] = Field(default_factory=dict)
+    findings_by_vector: Dict[str, int] = Field(default_factory=dict)
+    assets_total: int = 0
+    assets_in_scope: int = 0
+    assets_wildcard_suspected: int = 0
+    assets_by_state: Dict[str, int] = Field(default_factory=dict)
+    jobs_total: int = 0
+    jobs_by_status: Dict[str, int] = Field(default_factory=dict)
+
+
 class AssetResponse(SchemaBase):
     id: str
     scan_id: str
@@ -266,6 +336,7 @@ class AssetResponse(SchemaBase):
     registrable_domain: Optional[str] = None
     state: str
     in_scope: bool
+    scope_reason: str
     wildcard_suspected: bool
     source_modules: List[str] = Field(default_factory=list)
     evidence_count: int
@@ -275,6 +346,44 @@ class AssetResponse(SchemaBase):
     created_at: datetime
     last_observed_at: datetime
     updated_at: datetime
+
+
+class AssetObservationResponse(SchemaBase):
+    id: str
+    scan_id: str
+    asset_id: str
+    asset_type: str
+    canonical_value: str
+    state: str
+    source_module: Optional[str] = None
+    event_type: str
+    in_scope: bool
+    wildcard_suspected: bool
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+    observed_at: datetime
+    created_at: datetime
+
+
+class AssetObservationSummaryResponse(SchemaBase):
+    asset_id: str
+    observation_count: int
+    first_observed_at: datetime
+    last_observed_at: datetime
+
+
+class ScreenshotEvidenceResponse(SchemaBase):
+    id: str
+    scan_id: str
+    asset_id: Optional[str] = None
+    url: str
+    sha256: str
+    width: int
+    height: int
+    page_title: Optional[str] = None
+    status_code: Optional[int] = None
+    capture_metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    image_url: str
 
 
 class ScanDetailResponse(ScanResponse):
@@ -291,6 +400,12 @@ class SetPrimaryDomainRequest(BaseModel):
     )
 
 
+class ContentDiscoveryRequest(BaseModel):
+    """Reviewed manual path profile for authorized content discovery."""
+
+    profile: Literal["common", "exposure"] = "common"
+
+
 class FindingResponse(SchemaBase):
     id: str
     scan_id: str
@@ -304,6 +419,11 @@ class FindingResponse(SchemaBase):
     normalized_data: Dict[str, Any] = Field(default_factory=dict)
     tags: List[str] = Field(default_factory=list)
     created_at: datetime
+    first_seen_at: datetime
+    last_seen_at: datetime
+    observation_count: int = 1
+    revision: int = 1
+    last_observed_for: Optional[str] = None
 
 
 class PaginatedFindingsResponse(SchemaBase):

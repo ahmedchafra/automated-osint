@@ -34,6 +34,14 @@ async def _ensure_ips(ctx: VectorContext) -> set[str]:
 
 
 async def run(ctx: VectorContext) -> None:
+    if ctx.scan_mode == "passive":
+        await ctx.publish(
+            "validation_skipped",
+            vector_type="SERVICES",
+            reason="passive_mode",
+            findings_created=ctx.findings_created,
+        )
+        return
     ips = await _ensure_ips(ctx)
 
     # 1. Service-level enumeration (Shodan Host, Censys Host).

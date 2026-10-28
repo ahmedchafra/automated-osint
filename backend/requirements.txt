@@ -30,6 +30,7 @@ h8mail>=2.5
 python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4
 bcrypt==4.0.1
+playwright>=1.52.0,<2.0.0
 
 # Optional Tor SOCKS proxy support for the Ahmia collector
 PySocks>=1.7.1

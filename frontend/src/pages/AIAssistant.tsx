@@ -130,9 +130,12 @@ function AIAssistant({ scanId }: AIAssistantProps) {
     if (!activeJob || !queries) return;
     const matchingQuery = queries.find((q) => q.user_prompt.trim() === userPrompt.trim());
     if (matchingQuery && matchingQuery.search_results.length > 0) {
-      setActiveJob(null);
-      setExpandedQueryId(matchingQuery.id);
-      refetchQueries();
+      const timer = window.setTimeout(() => {
+        setActiveJob(null);
+        setExpandedQueryId(matchingQuery.id);
+        refetchQueries();
+      }, 0);
+      return () => window.clearTimeout(timer);
     }
   }, [queries, activeJob, userPrompt, refetchQueries]);
 

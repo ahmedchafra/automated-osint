@@ -6,6 +6,8 @@ from app.workers.initial_scan import (
 )
 from collectors.identity.theharvester import TheHarvesterCollector
 from app.services.asset_service import canonical_hostname, registrable_domain
+from app.services.asset_service import upsert_asset
+from app.services.discovery import process_discovery_findings
 from app.services.dns_validation import WildcardDnsResult, matches_wildcard
 from app.services.http_validation import public_ip_set
 from collectors.services.web_surface import _PageParser, _technology_names
@@ -16,12 +18,15 @@ from app.workers.active_validation import (
 )
 from app.workers.domain_deep_analysis import _collector_specs
 import httpx
+import asyncio
+from types import SimpleNamespace
 
 
 def test_discovered_names_stay_below_the_requested_domain():
     assert _valid_subdomain("www.example.com", "example.com")
     assert _valid_subdomain("example.com", "example.com")
     assert not _valid_subdomain("*.example.com", "example.com")
+    assert not _valid_subdomain("localhost", "example.com")
     assert not _valid_subdomain("example.com.attacker.test", "example.com")
     assert not _valid_subdomain("bad_label.example.com", "example.com")
 
@@ -95,8 +100,187 @@ def test_wildcard_match_requires_shared_dns_evidence():
             "dns_records": {"A": ["203.0.113.11"]},
         }
     }
+    partially_shared = {
+        "normalized_data": {
+            "dns_records": {
+                "A": ["203.0.113.10"],
+                "CNAME": ["dedicated.example.net."],
+            },
+        }
+    }
     assert matches_wildcard(matching, wildcard)
     assert not matches_wildcard(distinct, wildcard)
+    assert not matches_wildcard(partially_shared, wildcard)
+
+
+def test_discovery_processing_is_canonical_and_source_aware():
+    findings = [
+        {
+            "entity_type": "SUBDOMAIN",
+            "entity_value": "WWW.Example.COM.",
+            "source_module": "subfinder",
+            "confidence": 0.8,
+            "raw_data": {"provider": "alpha"},
+            "normalized_data": {"discovery_source": "alpha"},
+        },
+        {
+            "entity_type": "SUBDOMAIN",
+            "entity_value": "www.example.com",
+            "source_module": "subfinder",
+            "confidence": 0.95,
+            "raw_data": {"provider": "beta"},
+            "normalized_data": {"discovery_source": "beta"},
+        },
+        {
+            "entity_type": "SUBDOMAIN",
+            "entity_value": "www.example.com",
+            "source_module": "crtsh",
+            "confidence": 1.0,
+            "normalized_data": {},
+        },
+    ]
+
+    batch = process_discovery_findings(findings, root_domain="example.com")
+
+    assert len(batch.findings) == 2
+    assert batch.duplicates_merged == 1
+    assert batch.canonicalized == 1
+    assert {item["source_module"] for item in batch.findings} == {"subfinder", "crtsh"}
+    subfinder = next(item for item in batch.findings if item["source_module"] == "subfinder")
+    assert subfinder["entity_value"] == "www.example.com"
+    assert subfinder["confidence"] == 0.95
+    assert subfinder["normalized_data"]["provider_sources"] == ["alpha", "beta"]
+    assert subfinder["normalized_data"]["discovery_evidence_count"] == 2
+    assert len(subfinder["normalized_data"]["duplicate_evidence"]) == 1
+
+
+def test_discovery_processing_rejects_invalid_and_caps_after_deduplication():
+    findings = [
+        {"entity_type": "SUBDOMAIN", "entity_value": "api.example.com", "source_module": "test"},
+        {"entity_type": "SUBDOMAIN", "entity_value": "API.EXAMPLE.COM.", "source_module": "test"},
+        {"entity_type": "SUBDOMAIN", "entity_value": "*.example.com", "source_module": "test"},
+        {"entity_type": "SUBDOMAIN", "entity_value": "evil.test", "source_module": "test"},
+        {"entity_type": "IP_ADDRESS", "entity_value": "127.0.0.1", "source_module": "test"},
+        {"entity_type": "SUBDOMAIN", "entity_value": "www.example.com", "source_module": "test"},
+    ]
+
+    batch = process_discovery_findings(
+        findings, root_domain="example.com", max_findings=2
+    )
+
+    assert [item["entity_value"] for item in batch.findings] == [
+        "api.example.com", "www.example.com",
+    ]
+    assert batch.duplicates_merged == 1
+    assert batch.invalid_dropped == 3
+
+
+def test_asset_evidence_count_tracks_unique_sources_only():
+    asset = SimpleNamespace(
+        id="asset-id",
+        scan_id="scan",
+        asset_type="SUBDOMAIN",
+        canonical_value="www.example.com",
+        state="CANDIDATE",
+        source_modules=["crtsh"],
+        evidence_count=1,
+        in_scope=True,
+        scope_reason="allowed",
+        wildcard_suspected=False,
+        dns_records={},
+        resolved_ips=[],
+        http_metadata={},
+        last_observed_at=None,
+    )
+
+    class Result:
+        def scalar_one_or_none(self):
+            return asset
+
+    class Session:
+        def __init__(self):
+            self.added = []
+
+        async def execute(self, statement):
+            return Result()
+
+        def add(self, value):
+            self.added.append(value)
+
+    async def exercise():
+        session = Session()
+        await upsert_asset(
+            session, scan_id="scan", asset_type="SUBDOMAIN",
+            value="www.example.com", source_module="crtsh",
+        )
+        assert asset.evidence_count == 1
+        await upsert_asset(
+            session, scan_id="scan", asset_type="SUBDOMAIN",
+            value="www.example.com", source_module="subfinder",
+        )
+        return session
+
+    session = asyncio.run(exercise())
+    assert asset.evidence_count == 2
+    assert asset.source_modules == ["crtsh", "subfinder"]
+    assert [observation.event_type for observation in session.added] == [
+        "REOBSERVED", "SOURCE_ADDED",
+    ]
+
+
+def test_asset_observation_records_state_transitions_with_evidence():
+    asset = SimpleNamespace(
+        id="asset-id",
+        scan_id="scan",
+        asset_type="SUBDOMAIN",
+        canonical_value="www.example.com",
+        state="CANDIDATE",
+        source_modules=["crtsh"],
+        evidence_count=1,
+        in_scope=True,
+        scope_reason="allowed",
+        wildcard_suspected=False,
+        dns_records={},
+        resolved_ips=[],
+        http_metadata={},
+        last_observed_at=None,
+    )
+
+    class Result:
+        def scalar_one_or_none(self):
+            return asset
+
+    class Session:
+        def __init__(self):
+            self.added = []
+
+        async def execute(self, statement):
+            return Result()
+
+        def add(self, value):
+            self.added.append(value)
+
+    async def exercise():
+        session = Session()
+        await upsert_asset(
+            session,
+            scan_id="scan",
+            asset_type="SUBDOMAIN",
+            value="www.example.com",
+            state="RESOLVED",
+            source_module="dns_resolver",
+            dns_records={"A": ["93.184.216.34"]},
+            resolved_ips=["93.184.216.34"],
+        )
+        return session
+
+    session = asyncio.run(exercise())
+    observation = session.added[0]
+    assert asset.state == "RESOLVED"
+    assert observation.event_type == "STATE_CHANGED"
+    assert observation.state == "RESOLVED"
+    assert observation.evidence["previous_state"] == "CANDIDATE"
+    assert observation.evidence["resolved_ips"] == ["93.184.216.34"]
 
 
 def test_http_validation_rejects_private_or_mixed_address_sets():
@@ -172,3 +356,47 @@ def test_domain_deep_analysis_gates_interactive_collectors_by_mode_and_asset_sta
     assert "web_surface" not in unverified
     assert "version_detector" not in unverified
     assert {"web_surface", "version_detector"}.issubset(active)
+
+
+def test_passive_vector_profiles_skip_direct_identity_and_brand_probes(monkeypatch):
+    from app.services.vectors import identity, search
+
+    requested = []
+
+    class Collector:
+        def __init__(self, name):
+            self.name = name
+
+        async def execute(self, target):
+            return []
+
+    def collector(name):
+        requested.append(name)
+        return lambda: Collector(name)
+
+    class Context:
+        scan_mode = "passive"
+        target_domain = "example.com"
+        findings_created = 0
+
+        async def persist(self, findings):
+            return 0
+
+        async def commit(self):
+            return None
+
+        async def publish(self, *args, **kwargs):
+            return None
+
+    async def forbidden_mx_lookup(ctx):
+        raise AssertionError("passive identity must not query target MX records")
+
+    monkeypatch.setattr(search.registry, "get_collector", collector)
+    asyncio.run(search.run(Context()))
+    assert "dnstwist" not in requested
+
+    requested.clear()
+    monkeypatch.setattr(identity.registry, "get_collector", collector)
+    monkeypatch.setattr(identity, "_construct_subdomain_emails", forbidden_mx_lookup)
+    asyncio.run(identity.run(Context()))
+    assert "holehe" not in requested

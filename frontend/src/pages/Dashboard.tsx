@@ -41,6 +41,37 @@ const SEVERITY_COLORS: Record<string, string> = {
   INFO: '#3b82f6',
 };
 
+interface ChartTooltipProps {
+  active?: boolean;
+  payload?: Array<{ name?: string; value?: string | number }>;
+}
+
+interface RecentScan {
+  id: string;
+  target_domain: string;
+  target_type?: string;
+  status: string;
+  findings_count?: number;
+  created_at: string;
+}
+
+function CustomTooltip({ active, payload }: ChartTooltipProps) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div style={{
+      background: 'var(--glass-bg)',
+      border: '1px solid var(--glass-border)',
+      borderRadius: 'var(--radius-md)',
+      padding: 'var(--space-2) var(--space-3)',
+      backdropFilter: 'blur(12px)',
+      fontSize: 'var(--text-sm)',
+    }}>
+      <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>{payload[0].name}</span>
+      <span style={{ color: 'var(--text-strong)', fontWeight: 700, marginLeft: 8 }}>{payload[0].value}</span>
+    </div>
+  );
+}
+
 function Dashboard() {
   const { data: stats, isLoading, error } = useQuery({
     queryKey: ['dashboardStats'],
@@ -151,23 +182,6 @@ function Dashboard() {
   };
 
   // ── Custom tooltip for charts ─────────────────────────────────
-  const CustomTooltip = ({ active, payload }: any) => {
-    if (!active || !payload?.length) return null;
-    return (
-      <div style={{
-        background: 'var(--glass-bg)',
-        border: '1px solid var(--glass-border)',
-        borderRadius: 'var(--radius-md)',
-        padding: 'var(--space-2) var(--space-3)',
-        backdropFilter: 'blur(12px)',
-        fontSize: 'var(--text-sm)',
-      }}>
-        <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>{payload[0].name}</span>
-        <span style={{ color: 'var(--text-strong)', fontWeight: 700, marginLeft: 8 }}>{payload[0].value}</span>
-      </div>
-    );
-  };
-
   return (
     <motion.div
       className="ws-container"
@@ -526,7 +540,7 @@ function Dashboard() {
               </tr>
             </thead>
             <tbody>
-              {stats?.recent_scans?.map((scan: any) => (
+              {stats?.recent_scans?.map((scan: RecentScan) => (
                 <tr key={scan.id}>
                   <td>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>

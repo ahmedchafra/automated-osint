@@ -7,6 +7,8 @@ from app.models.ai_query import AIQuery
 from app.models.scan_collaborator import ScanCollaborator
 from app.models.scan_job import ScanJob
 from app.models.asset import Asset
+from app.models.asset_observation import AssetObservation
+from app.models.screenshot import ScreenshotEvidence
 
 # Explicitly import all models to ensure they are registered with Base.metadata
 __all__ = [
@@ -20,5 +22,7 @@ __all__ = [
     "ScanCollaborator",
     "ScanJob",
     "Asset",
+    "AssetObservation",
+    "ScreenshotEvidence",
 ]
 

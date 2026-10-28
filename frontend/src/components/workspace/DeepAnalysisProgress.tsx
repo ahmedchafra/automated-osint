@@ -50,17 +50,22 @@ export function DeepAnalysisProgress({
   running, items, totalFindings, title,
 }: DeepAnalysisProgressProps) {
   // ── Live elapsed timer ─────────────────────────────────────────────
-  const startRef = useRef(Date.now());
+  const startRef = useRef<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
     if (!running) return;
     startRef.current = Date.now();
-    setElapsed(0);
+    const resetTimer = setTimeout(() => setElapsed(0), 0);
     const interval = setInterval(() => {
-      setElapsed(Date.now() - startRef.current);
+      if (startRef.current !== null) {
+        setElapsed(Date.now() - startRef.current);
+      }
     }, 1000);
-    return () => clearInterval(interval);
+    return () => {
+      clearTimeout(resetTimer);
+      clearInterval(interval);
+    };
   }, [running]);
 
   // If not running but we have items, freeze the final elapsed time

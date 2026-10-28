@@ -19,6 +19,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.finding import Finding
+from app.services.finding_contract import prepare_finding
+from app.services.finding_service import refresh_finding
 from app.services.progress import ScanProgressPublisher
 
 
@@ -29,10 +31,17 @@ class VectorContext:
     target_domain: str
     target_usernames: list[str]
     publisher: ScanProgressPublisher
+    target_type: str = "domain"
+    scan_mode: str = "validated"
+    scope_manifest: dict[str, Any] = field(default_factory=dict)
 
     # Mutable running state — strategies append / replace as they work.
     findings_created: int = 0
-    seen: set[tuple[str, str, str, str]] = field(default_factory=set)
+    # Mirrors uq_finding_scan_entity_source on the findings table. Vector is
+    # deliberately absent: the same evidence cannot be inserted twice merely
+    # because two orchestration phases classified it differently.
+    seen: set[tuple[str, str, str]] = field(default_factory=set)
+    existing_findings: dict[tuple[str, str, str], Finding] = field(default_factory=dict)
 
     # Cross-vector scratch space. The infrastructure vector writes
     # resolved IPs here; services reads them so we don't re-run DNS.
@@ -44,101 +53,101 @@ class VectorContext:
             select(Finding).where(Finding.scan_id == self.scan_id)
         )
         self.seen = set()
+        self.existing_findings = {}
         for finding in result.scalars().all():
             key = (
-                str(finding.vector_type or ""),
                 str(finding.entity_type or ""),
                 str(finding.entity_value or ""),
                 str(finding.source_module or ""),
             )
             self.seen.add(key)
+            self.existing_findings[key] = finding
 
     async def persist(self, findings: Iterable[dict[str, Any]]) -> int:
         """Persist a batch of finding dicts, skipping duplicates.
 
         Returns the number of new rows inserted.
         """
-        new = 0
+        pending: list[Finding] = []
+        new_keys: list[tuple[str, str, str]] = []
+        processed_keys: set[tuple[str, str, str]] = set()
         for finding in findings:
-            try:
-                # Build dedup key with defensive string coercion
-                vt = str(finding.get("vector_type", ""))
-                et = str(finding.get("entity_type", ""))
-                ev = str(finding.get("entity_value", ""))
-                sm = str(finding.get("source_module", ""))
-                key = (vt, et, ev, sm)
-                if key in self.seen:
-                    continue
-                self.seen.add(key)
-
-                # Build a safe copy with only the columns the Finding model expects
-                # This prevents unexpected keys from causing issues
-                safe = {
-                    "vector_type": vt,
-                    "entity_type": et,
-                    "entity_value": ev,
-                    "severity": str(finding.get("severity", "INFO")),
-                    "confidence": float(finding.get("confidence", 0.5)),
-                    "source_module": sm,
-                    "raw_data": finding.get("raw_data", {}),
-                    "normalized_data": finding.get("normalized_data", {}),
-                    "tags": finding.get("tags", []) or [],
-                }
-                # Ensure JSON fields are dicts/lists, not strings
-                if isinstance(safe["raw_data"], str):
-                    safe["raw_data"] = {"raw": safe["raw_data"]}
-                if isinstance(safe["normalized_data"], str):
-                    safe["normalized_data"] = {"data": safe["normalized_data"]}
-                if isinstance(safe["tags"], str):
-                    safe["tags"] = [safe["tags"]]
-
-                self.db.add(Finding(scan_id=self.scan_id, **safe))
-                self.findings_created += 1
-                new += 1
-            except Exception as e:
-                print(f"[persist] ERROR skipping finding: {e} | finding={finding!r}")
+            safe = prepare_finding(finding)
+            key = (
+                safe["entity_type"], safe["entity_value"], safe["source_module"],
+            )
+            if key in processed_keys:
                 continue
-        if new:
-            try:
-                # Use savepoint so a flush failure only rolls back this batch
-                # rather than wiping all uncommitted changes in the session.
-                async with self.db.begin_nested():
-                    await self.db.flush()
-            except Exception as e:
-                print(f"[persist] FLUSH ERROR: {e}")
-                # Savepoint was rolled back; outer transaction is still usable.
-                # Revert counters and reload seen from DB for consistency.
-                self.findings_created -= new
-                await self.load_seen_findings()
-                return 0
-        return new
+            processed_keys.add(key)
+            existing = self.existing_findings.get(key)
+            if existing is not None:
+                refresh_finding(existing, safe, observed_for=self.target_domain)
+                continue
+            pending.append(
+                Finding(
+                    scan_id=self.scan_id,
+                    **safe,
+                    last_observed_for=self.target_domain,
+                )
+            )
+            new_keys.append(key)
+
+        if not pending:
+            self.seen.update(processed_keys)
+            return 0
+
+        self.db.add_all(pending)
+        await self.db.flush()
+        for finding, key in zip(pending, new_keys):
+            self.existing_findings[key] = finding
+        self.seen.update(processed_keys)
+        self.findings_created += len(pending)
+        return len(pending)
 
     async def persist_ip(self, ip: str) -> bool:
         """Helper for the common case of recording a discovered IP."""
-        key = ("INFRASTRUCTURE", "IP_ADDRESS", ip, "dns_resolver")
-        if key in self.seen:
+        key = ("IP_ADDRESS", ip, "dns_resolver")
+        existing = self.existing_findings.get(key)
+        if existing is not None:
+            refresh_finding(
+                existing,
+                {
+                    "vector_type": "INFRASTRUCTURE",
+                    "entity_type": "IP_ADDRESS",
+                    "entity_value": ip,
+                    "severity": "INFO",
+                    "confidence": 1.0,
+                    "source_module": "dns_resolver",
+                    "raw_data": {"ip": ip},
+                    "normalized_data": {"ip": ip},
+                    "tags": ["resolved-ip"],
+                },
+                observed_for=self.target_domain,
+            )
             return False
         self.seen.add(key)
-        self.db.add(
-            Finding(
-                scan_id=self.scan_id,
-                vector_type="INFRASTRUCTURE",
-                entity_type="IP_ADDRESS",
-                entity_value=ip,
-                severity="INFO",
-                confidence=1.0,
-                source_module="dns_resolver",
-                raw_data={"ip": ip},
-                normalized_data={"ip": ip},
-                tags=["resolved-ip"],
-            )
+        finding = Finding(
+            scan_id=self.scan_id,
+            vector_type="INFRASTRUCTURE",
+            entity_type="IP_ADDRESS",
+            entity_value=ip,
+            severity="INFO",
+            confidence=1.0,
+            source_module="dns_resolver",
+            raw_data={"ip": ip},
+            normalized_data={"ip": ip},
+            tags=["resolved-ip"],
+            last_observed_for=self.target_domain,
         )
+        self.db.add(finding)
+        self.existing_findings[key] = finding
         self.findings_created += 1
         self.resolved_ips.add(ip)
         return True
 
     async def commit(self) -> None:
-        await self.db.commit()
+        """Flush a vector checkpoint without closing its orchestrator savepoint."""
+        await self.db.flush()
 
     async def publish(self, event: str, **payload: Any) -> None:
         message = {

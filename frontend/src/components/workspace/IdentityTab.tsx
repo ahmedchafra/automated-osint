@@ -5,16 +5,57 @@ import {
   ExternalLink, AlertTriangle, Database, Globe, Calendar, KeyRound, Users, Link, Building2, Hash,
   Download,
 } from 'lucide-react';
-import { useScanWorkspace } from '../../context/ScanWorkspaceContext';
+import { useScanWorkspace } from '../../context/scan-workspace-state';
 import { DeepAnalysisProgress, type ProgressItem } from './DeepAnalysisProgress';
 import apiClient from '../../api/client';
+import type { FindingRow } from '../FindingsTable';
+import { errorMessage } from '../../utils/errors';
 
 // One finding's normalized_data shape varies by source, so we read fields
 // defensively. BREACH findings from XposedOrNot carry `breaches[]` with
 // name/breach_date/data_classes and a risk_score. EMAIL_PLATFORM from
 // holehe carries platform/url/registered. PROFILE from maigret carries
 // platform/url/username/tags.
-type NormData = Record<string, any>;
+type BreachDetail = {
+  name?: string;
+  breach_name?: string;
+  password_risk?: string;
+  verified?: boolean;
+  description?: string;
+  breach_date?: string;
+  records_count?: number;
+  industry?: string;
+  data_classes?: string[];
+  domain?: string;
+  references?: string;
+};
+
+type NormData = {
+  breaches?: BreachDetail[];
+  breach_count?: number;
+  breach_name?: string;
+  department?: string;
+  email?: string;
+  first_name?: string;
+  last_name?: string;
+  linkedin?: string;
+  phone_number?: string;
+  platform?: string;
+  position?: string;
+  registered?: boolean;
+  seniority?: string;
+  sources?: unknown[];
+  twitter?: string;
+  type?: string;
+  url?: string;
+  username?: string;
+  risk_score?: number;
+  organization?: string;
+  email_pattern?: string;
+  disposable?: boolean;
+  webmail?: boolean;
+  [key: string]: unknown;
+};
 
 function formatDate(iso: string | undefined | null): string {
   if (!iso) return '—';
@@ -26,6 +67,8 @@ function formatDate(iso: string | undefined | null): string {
 
 export function IdentityTab() {
   const { state, dispatch } = useScanWorkspace();
+  const scanId = state.scan?.id;
+  const findingsCount = state.findings.length;
   const [selectedEmails, setSelectedEmails] = useState<Set<string>>(new Set());
   const [breachCheckRunning, setBreachCheckRunning] = useState(false);
   const [deepDiveEmail, setDeepDiveEmail] = useState<string | null>(null);
@@ -205,10 +248,10 @@ export function IdentityTab() {
   }, []);
 
   const downloadEmailExport = useCallback(async (format: 'csv' | 'txt') => {
-    if (!state.scan?.id) return;
+    if (!scanId) return;
     setExportError(null);
     try {
-      const response = await apiClient.get(`/scans/${state.scan.id}/export/emails?format=${format}`, {
+      const response = await apiClient.get(`/scans/${scanId}/export/emails?format=${format}`, {
         responseType: 'blob',
       });
       const disposition = String(response.headers['content-disposition'] ?? '');
@@ -224,42 +267,41 @@ export function IdentityTab() {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || err.message || 'Export failed';
-      setExportError(detail);
+    } catch (err: unknown) {
+      setExportError(errorMessage(err, 'Export failed'));
       console.error('Email export failed:', err);
     }
-  }, [state.scan?.id]);
+  }, [scanId]);
 
   const handleCheckBreaches = useCallback(async () => {
-    if (selectedEmails.size === 0 || !state.scan?.id || effectiveBreachRunning) return;
-    breachBaselineRef.current = state.findings.length;
+    if (selectedEmails.size === 0 || !scanId || effectiveBreachRunning) return;
+    breachBaselineRef.current = findingsCount;
     setBreachCheckRunning(true);
     dispatch({ type: 'BREACH_CHECK_STARTED', emails: Array.from(selectedEmails) });
     try {
       // POST returns 202 Accepted — the Celery task runs in background.
       // Keep breachCheckRunning true until WS event or findings auto-refresh.
-      await apiClient.post(`/scans/${state.scan.id}/check-breaches`, {
+      await apiClient.post(`/scans/${scanId}/check-breaches`, {
         emails: Array.from(selectedEmails),
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Breach check failed:', err);
       setBreachCheckRunning(false);
     }
     // DO NOT clear breachCheckRunning here — WS or findings-polling useEffect handles it
-  }, [selectedEmails, state.scan?.id, state.findings.length, dispatch, effectiveBreachRunning]);
+  }, [selectedEmails, scanId, findingsCount, dispatch, effectiveBreachRunning]);
 
   const handleDeepDive = async (email: string) => {
-    if (!state.scan?.id || effectiveDeepDiveRunning) return;
-    deepDiveBaselineRef.current = state.findings.length;
+    if (!scanId || effectiveDeepDiveRunning) return;
+    deepDiveBaselineRef.current = findingsCount;
     setDeepDiveEmail(email);
     setDeepDiveRunning(true);
     dispatch({ type: 'EMAIL_DEEP_ANALYSIS_STARTED', emails: [email] });
     try {
-      await apiClient.post(`/scans/${state.scan.id}/email-deep-analysis`, {
+      await apiClient.post(`/scans/${scanId}/email-deep-analysis`, {
         emails: [email],
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Deep dive failed:', err);
       setDeepDiveEmail(null);
       setDeepDiveRunning(false);
@@ -309,36 +351,35 @@ export function IdentityTab() {
   // Sync context breach-check state → local state (WS may deliver completion)
   useEffect(() => {
     if (!state.breachCheckRunning && breachCheckRunning) {
-      setBreachCheckRunning(false);
+      const timer = window.setTimeout(() => setBreachCheckRunning(false), 0);
+      return () => window.clearTimeout(timer);
     }
   }, [state.breachCheckRunning, breachCheckRunning]);
 
   // Sync context email deep-analysis state → local state
   useEffect(() => {
     if (!state.emailDeepAnalysisRunning && deepDiveRunning) {
-      setDeepDiveEmail(null);
-      setDeepDiveRunning(false);
+      const timer = window.setTimeout(() => {
+        setDeepDiveEmail(null);
+        setDeepDiveRunning(false);
+      }, 0);
+      return () => window.clearTimeout(timer);
     }
   }, [state.emailDeepAnalysisRunning, deepDiveRunning]);
 
-  if (allEmails.length === 0 && domainMeta.length === 0) {
-    return (
-      <div className="ws-empty">
-        <Shield size={32} style={{ marginBottom: 8, opacity: 0.4 }} />
-        <div>No identity data yet.</div>
-        <div style={{ fontSize: 11, marginTop: 4 }}>
-          Conduct a "Deep Analysis" on a domain in the Infrastructure tab to discover emails.
-        </div>
-      </div>
-    );
-  }
-
   const domainInfo = domainMeta[0];
-  const expandedBreaches = expandedEmail ? breachesByEmail[expandedEmail] || [] : [];
-  const expandedPlatforms = expandedEmail ? platformsByEmail[expandedEmail] || [] : [];
-  const expandedProfiles = expandedEmail
-    ? profilesByUsername[expandedEmail.split('@')[0]] || []
-    : [];
+  const expandedBreaches = useMemo(
+    () => expandedEmail ? breachesByEmail[expandedEmail] || [] : [],
+    [breachesByEmail, expandedEmail],
+  );
+  const expandedPlatforms = useMemo(
+    () => expandedEmail ? platformsByEmail[expandedEmail] || [] : [],
+    [platformsByEmail, expandedEmail],
+  );
+  const expandedProfiles = useMemo(
+    () => expandedEmail ? profilesByUsername[expandedEmail.split('@')[0]] || [] : [],
+    [expandedEmail, profilesByUsername],
+  );
   // Best risk score for the expanded email (if any breaches present)
   const expandedRisk = expandedBreaches.reduce((max, b) => {
     const r = Number((b.normalized_data as NormData)?.risk_score || 0);
@@ -351,7 +392,7 @@ export function IdentityTab() {
     for (const b of expandedBreaches) {
       const nd = (b.normalized_data as NormData) || {};
       // xposedornot format: normalized_data.breaches[] array
-      const list: any[] = nd.breaches || [];
+      const list = nd.breaches || [];
       if (list.length > 0) {
         for (const detail of list) {
           const n = detail.name || detail.breach_name;
@@ -377,6 +418,18 @@ export function IdentityTab() {
     }
     return Array.from(names);
   }, [expandedBreaches]);
+
+  if (allEmails.length === 0 && domainMeta.length === 0) {
+    return (
+      <div className="ws-empty">
+        <Shield size={32} style={{ marginBottom: 8, opacity: 0.4 }} />
+        <div>No identity data yet.</div>
+        <div style={{ fontSize: 11, marginTop: 4 }}>
+          Conduct a "Deep Analysis" on a domain in the Infrastructure tab to discover emails.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="ws-identity">
@@ -479,10 +532,10 @@ export function IdentityTab() {
         <div style={{ marginBottom: 16, padding: 12, background: 'var(--glass-bg)', border: '1px solid var(--glass-border)', borderRadius: 'var(--radius-lg)' }}>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, color: 'var(--text-strong)' }}>Domain Intelligence</div>
           <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', fontSize: 12, fontFamily: 'var(--font-mono)' }}>
-            {Boolean((domainInfo.normalized_data as any)?.organization) && <div>Org: {String((domainInfo.normalized_data as any).organization)}</div>}
-            {Boolean((domainInfo.normalized_data as any)?.email_pattern) && <div>Pattern: {String((domainInfo.normalized_data as any).email_pattern)}</div>}
-            {(domainInfo.normalized_data as any)?.disposable !== undefined && <div>Disposable: {(domainInfo.normalized_data as any).disposable ? 'Yes' : 'No'}</div>}
-            {(domainInfo.normalized_data as any)?.webmail !== undefined && <div>Webmail: {(domainInfo.normalized_data as any).webmail ? 'Yes' : 'No'}</div>}
+            {Boolean((domainInfo.normalized_data as NormData)?.organization) && <div>Org: {String((domainInfo.normalized_data as NormData).organization)}</div>}
+            {Boolean((domainInfo.normalized_data as NormData)?.email_pattern) && <div>Pattern: {String((domainInfo.normalized_data as NormData).email_pattern)}</div>}
+            {(domainInfo.normalized_data as NormData)?.disposable !== undefined && <div>Disposable: {(domainInfo.normalized_data as NormData).disposable ? 'Yes' : 'No'}</div>}
+            {(domainInfo.normalized_data as NormData)?.webmail !== undefined && <div>Webmail: {(domainInfo.normalized_data as NormData).webmail ? 'Yes' : 'No'}</div>}
           </div>
         </div>
       )}
@@ -783,10 +836,10 @@ function EmailDetailPanel({
   riskScore,
 }: {
   email: string;
-  breachRecords: any[];
+  breachRecords: FindingRow[];
   breachNames: string[];
-  platforms: any[];
-  profiles: any[];
+  platforms: FindingRow[];
+  profiles: FindingRow[];
   riskScore: number;
 }) {
   return (
@@ -844,10 +897,10 @@ function EmailDetailPanel({
                 {breachNames.map(name => {
                   // Find matching detail from xposedornot format (breaches[])
                   const isGeneric = name.startsWith('Breach #');
-                  const detail = isGeneric ? null : (
+                  const detail = (isGeneric ? null : (
                     breachRecords
-                      .flatMap(b => ((b.normalized_data as NormData)?.breaches || []) as any[])
-                      .find((d: any) => (d.name || d.breach_name) === name)
+                      .flatMap(b => (b.normalized_data as NormData)?.breaches || [])
+                      .find(d => (d.name || d.breach_name) === name)
                     // Fall back to h8mail format (breach_name on normalized_data)
                     || breachRecords
                       .map(b => b.normalized_data as NormData)
@@ -855,7 +908,7 @@ function EmailDetailPanel({
                     // Fall back to entity_value suffix
                     || breachRecords
                       .find(b => String(b.entity_value).split('::')[1] === name)
-                  );
+                  )) as BreachDetail | null;
                   return (
                     <div
                       key={name}
@@ -897,9 +950,9 @@ function EmailDetailPanel({
                             <Calendar size={9} /> {formatDate(detail.breach_date)}
                           </span>
                         )}
-                        {detail?.records_count > 0 && (
+                        {(detail?.records_count ?? 0) > 0 && (
                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, color: 'var(--text-muted)', fontSize: 10, padding: '1px 5px', background: 'var(--bg-secondary)', borderRadius: 3 }}>
-                            <Users size={9} /> {detail.records_count.toLocaleString()} records
+                            <Users size={9} /> {Number(detail?.records_count).toLocaleString()} records
                           </span>
                         )}
                         {detail?.industry && (

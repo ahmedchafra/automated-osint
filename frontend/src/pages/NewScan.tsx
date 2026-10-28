@@ -17,6 +17,21 @@ import {
 
 type TargetType = 'domain' | 'ip' | 'organization';
 type ScanMode = 'passive' | 'validated' | 'active';
+type ScopePayload = {
+  allowed_domains: string[];
+  allowed_cidrs: string[];
+  excluded_domains: string[];
+  excluded_cidrs: string[];
+  excluded_url_paths: string[];
+  allowed_ports: number[];
+  allow_subdomains: boolean;
+  allow_resolved_ips: boolean;
+};
+
+const splitScopeValues = (value: string) => value
+  .split(/[\n,]+/)
+  .map(item => item.trim())
+  .filter(Boolean);
 
 const SCAN_MODES: { value: ScanMode; label: string; description: string }[] = [
   {
@@ -46,7 +61,7 @@ const PIPELINE_PHASES: Record<TargetType, { label: string; description: string; 
   domain: [
     {
       label: 'Phase 1 — Infrastructure',
-      description: 'crt.sh · subfinder · DNS · Shodan InternetDB',
+      description: 'crt.sh · subfinder · Common Crawl · DNS/email posture · RDAP',
       colorVar: 'var(--severity-info)',
     },
     {
@@ -58,7 +73,7 @@ const PIPELINE_PHASES: Record<TargetType, { label: string; description: string; 
   ip: [
     {
       label: 'Phase 1 — Reverse DNS & Ports',
-      description: 'PTR lookup · Shodan InternetDB · ASN',
+      description: 'PTR lookup · Shodan InternetDB · RDAP · RIPEstat',
       colorVar: 'var(--severity-info)',
     },
     {
@@ -68,7 +83,7 @@ const PIPELINE_PHASES: Record<TargetType, { label: string; description: string; 
     },
     {
       label: 'Phase 3 — Domain Convergence',
-      description: 'If PTR finds a domain → crt.sh · subfinder · theHarvester',
+      description: 'If PTR finds a domain → crt.sh · Common Crawl · DNS/email posture',
       colorVar: 'var(--severity-critical)',
     },
   ],
@@ -80,7 +95,7 @@ const PIPELINE_PHASES: Record<TargetType, { label: string; description: string; 
     },
     {
       label: 'Phase 2 — Infrastructure',
-      description: 'crt.sh · subfinder · DNS · Shodan',
+      description: 'crt.sh · subfinder · DNS/email posture · Shodan',
       colorVar: 'var(--severity-high)',
     },
     {
@@ -161,6 +176,13 @@ export default function NewScan() {
   const [error, setError] = useState<string | null>(null);
   const [touched, setTouched] = useState(false);
   const [detectedType, setDetectedType] = useState<TargetType | null>(null);
+  const [showScope, setShowScope] = useState(false);
+  const [allowedDomains, setAllowedDomains] = useState('');
+  const [allowedCidrs, setAllowedCidrs] = useState('');
+  const [excludedDomains, setExcludedDomains] = useState('');
+  const [excludedCidrs, setExcludedCidrs] = useState('');
+  const [excludedPaths, setExcludedPaths] = useState('/logout\n/delete/*');
+  const [allowedPorts, setAllowedPorts] = useState('');
 
   // Auto-detect type whenever value changes, but don't override manual selection
   const handleValueChange = useCallback((value: string) => {
@@ -179,7 +201,7 @@ export default function NewScan() {
   }, [targetValue, targetType, touched]);
 
   const mutation = useMutation({
-    mutationFn: async ({ type, value, mode }: { type: TargetType; value: string; mode: ScanMode }) => {
+    mutationFn: async ({ type, value, mode, scope }: { type: TargetType; value: string; mode: ScanMode; scope?: ScopePayload }) => {
       const endpoint = type === 'domain'
         ? '/scans/initial'
         : type === 'ip'
@@ -187,8 +209,8 @@ export default function NewScan() {
           : '/scans/organization';
 
       const payload = type === 'domain'
-        ? { target_domain: value, scan_mode: mode, selected_vectors: ['INFRASTRUCTURE'] }
-        : { target_value: value, target_type: type, scan_mode: mode, selected_vectors: ['INFRASTRUCTURE'] };
+        ? { target_domain: value, scan_mode: mode, selected_vectors: ['INFRASTRUCTURE'], scope_manifest: scope }
+        : { target_value: value, target_type: type, scan_mode: mode, selected_vectors: ['INFRASTRUCTURE'], scope_manifest: scope };
 
       const { data } = await apiClient.post(endpoint, payload);
       return data;
@@ -212,7 +234,22 @@ export default function NewScan() {
     const ve = validateTarget(targetValue, targetType);
     if (ve) return; // inline validation will show the error
 
-    mutation.mutate({ type: targetType, value: targetValue.trim(), mode: scanMode });
+    const ports = splitScopeValues(allowedPorts).map(Number);
+    if (showScope && ports.some(port => !Number.isInteger(port) || port < 1 || port > 65535)) {
+      setError('Allowed ports must be whole numbers between 1 and 65535.');
+      return;
+    }
+    const scope = showScope ? {
+      allowed_domains: splitScopeValues(allowedDomains),
+      allowed_cidrs: splitScopeValues(allowedCidrs),
+      excluded_domains: splitScopeValues(excludedDomains),
+      excluded_cidrs: splitScopeValues(excludedCidrs),
+      excluded_url_paths: splitScopeValues(excludedPaths),
+      allowed_ports: ports,
+      allow_subdomains: true,
+      allow_resolved_ips: true,
+    } : undefined;
+    mutation.mutate({ type: targetType, value: targetValue.trim(), mode: scanMode, scope });
   };
 
   const isLoading = mutation.isPending;
@@ -308,6 +345,51 @@ export default function NewScan() {
             }}>
               <AlertTriangle size={12} />
               <span>{validationError}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="ns-input-row">
+          <button
+            type="button"
+            className="ns-type-btn"
+            onClick={() => setShowScope(value => !value)}
+            disabled={isLoading}
+            aria-expanded={showScope}
+            style={{ width: '100%', justifyContent: 'space-between' }}
+          >
+            <span>Advanced target scope</span>
+            <span>{showScope ? 'Hide' : 'Configure'}</span>
+          </button>
+          <div style={{ marginTop: 7, fontSize: 11, color: 'var(--text-muted)' }}>
+            The submitted domain or IP is always included. Leave other allow-lists empty to keep the narrow default.
+          </div>
+          {showScope && (
+            <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10 }}>
+              {[
+                ['Additional allowed domains', allowedDomains, setAllowedDomains, 'trusted.example.com'],
+                ['Allowed public CIDRs', allowedCidrs, setAllowedCidrs, '93.184.216.0/24'],
+                ['Excluded domains', excludedDomains, setExcludedDomains, 'admin.example.com'],
+                ['Excluded CIDRs', excludedCidrs, setExcludedCidrs, '93.184.216.25/32'],
+                ['Excluded URL paths', excludedPaths, setExcludedPaths, '/logout\n/delete/*'],
+                ['Allowed ports (optional)', allowedPorts, setAllowedPorts, '80, 443, 8443'],
+              ].map(([label, value, setter, hint]) => (
+                <label key={label as string} style={{ display: 'flex', flexDirection: 'column', gap: 5, fontSize: 10, color: 'var(--text-muted)' }}>
+                  <span>{label as string}</span>
+                  <textarea
+                    className="form-input"
+                    rows={2}
+                    value={value as string}
+                    onChange={event => (setter as React.Dispatch<React.SetStateAction<string>>)(event.target.value)}
+                    placeholder={hint as string}
+                    disabled={isLoading}
+                    style={{ resize: 'vertical', minHeight: 54, fontFamily: 'var(--font-mono)', fontSize: 11 }}
+                  />
+                </label>
+              ))}
+              <div style={{ gridColumn: '1 / -1', fontSize: 10, lineHeight: 1.5, color: '#f59e0b' }}>
+                Exclusions are safety boundaries, not useless assets. Sensitive admin surfaces can still be retained as evidence and manually included later. Logout and destructive paths stay excluded from automated browsing.
+              </div>
             </div>
           )}
         </div>

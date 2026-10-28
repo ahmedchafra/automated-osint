@@ -1,1 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?><theHarvester><cmd>-d tesla.com -b urlscan -l 100 -f /tmp/th_out</cmd></theHarvester>

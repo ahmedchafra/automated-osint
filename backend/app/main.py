@@ -12,6 +12,10 @@ from app.api.ws import router as ws_router
 from app.database import AsyncSessionLocal, Base, engine
 from app.core.exceptions import sqlalchemy_exception_handler, generic_exception_handler
 from app.config import settings
+from app.core.logging_security import suppress_http_client_request_logs
+
+
+suppress_http_client_request_logs()
 
 
 async def _bootstrap_initial_admin() -> None:

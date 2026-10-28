@@ -1,18 +1,18 @@
 declare module 'cytoscape' {
   interface ElementDefinition {
-    data: Record<string, any>;
+    data: Record<string, unknown>;
   }
 
   interface CytoscapeStyle {
     selector: string;
-    style: Record<string, any>;
+    style: Record<string, unknown>;
   }
 
   interface LayoutOptions {
     name: string;
     animate?: boolean;
     animationDuration?: number;
-    [key: string]: any;
+    [key: string]: unknown;
   }
 
   interface Core {

@@ -5,6 +5,7 @@ import {
   Loader2, AlertCircle, CheckCircle2, Mail,
 } from 'lucide-react';
 import apiClient from '../../api/client';
+import { errorMessage } from '../../utils/errors';
 
 /* ─── Types ─────────────────────────────────────────────────────────── */
 
@@ -76,15 +77,19 @@ export default function CollaboratorModal({ scanId, currentUserId, isOpen, onClo
   }, [scanId]);
 
   useEffect(() => {
-    if (isOpen) {
+    if (!isOpen) return;
+    const initializeTimer = setTimeout(() => {
       setLoading(true);
       setMsg(null);
       setSearchQuery('');
       setSearchResults([]);
-      loadCollaborators();
-      // Focus search input after a brief delay for animation
-      setTimeout(() => searchInputRef.current?.focus(), 200);
-    }
+      void loadCollaborators();
+    }, 0);
+    const focusTimer = setTimeout(() => searchInputRef.current?.focus(), 200);
+    return () => {
+      clearTimeout(initializeTimer);
+      clearTimeout(focusTimer);
+    };
   }, [isOpen, loadCollaborators]);
 
   // Debounced user search
@@ -125,9 +130,8 @@ export default function CollaboratorModal({ scanId, currentUserId, isOpen, onClo
       setMsg({ ok: true, text: `Added ${username} as ${permission}` });
       setSearchResults(prev => prev.filter(u => u.id !== userId));
       await loadCollaborators();
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || 'Failed to add collaborator';
-      setMsg({ ok: false, text: detail });
+    } catch (err: unknown) {
+      setMsg({ ok: false, text: errorMessage(err, 'Failed to add collaborator') });
     } finally {
       setAdding(null);
     }
@@ -144,9 +148,8 @@ export default function CollaboratorModal({ scanId, currentUserId, isOpen, onClo
       });
       setMsg({ ok: true, text: `Changed ${username} to ${newPermission}` });
       await loadCollaborators();
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || 'Failed to update permission';
-      setMsg({ ok: false, text: detail });
+    } catch (err: unknown) {
+      setMsg({ ok: false, text: errorMessage(err, 'Failed to update permission') });
     }
     setTimeout(() => setMsg(null), 3000);
   };
@@ -159,9 +162,8 @@ export default function CollaboratorModal({ scanId, currentUserId, isOpen, onClo
       await apiClient.delete(`/scans/${scanId}/collaborators/${userId}`);
       setMsg({ ok: true, text: `Removed ${username}` });
       await loadCollaborators();
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || 'Failed to remove collaborator';
-      setMsg({ ok: false, text: detail });
+    } catch (err: unknown) {
+      setMsg({ ok: false, text: errorMessage(err, 'Failed to remove collaborator') });
     }
     setTimeout(() => setMsg(null), 3000);
   };

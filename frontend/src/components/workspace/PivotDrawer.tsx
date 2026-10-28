@@ -1,6 +1,7 @@
 import { X, ExternalLink, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { useScanWorkspace } from '../../context/ScanWorkspaceContext';
+import { useScanWorkspace } from '../../context/scan-workspace-state';
+import type { FindingRow } from '../FindingsTable';
 
 interface Props {
   email: string | null;
@@ -13,7 +14,7 @@ export function PivotDrawer({ email, open, onClose }: Props) {
 
   if (!open || !email) return null;
 
-  const emailFilter = (f: any) =>
+  const emailFilter = (f: FindingRow) =>
     f.normalized_data?.email === email ||
     f.entity_value === email ||
     f.raw_data?.email === email;

@@ -1,18 +1,12 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { ShieldCheck, Cloud, Loader2, ChevronDown, ChevronRight, Search, ExternalLink } from 'lucide-react';
-import { useScanWorkspace } from '../../context/ScanWorkspaceContext';
+import { useScanWorkspace } from '../../context/scan-workspace-state';
 import apiClient from '../../api/client';
 
 export function BrandProtectionTab() {
   const { state, dispatch } = useScanWorkspace();
-  const [selectedDomain, setSelectedDomain] = useState<string>(state.activeEnrichmentDomain || '');
-
-  // Sync with active enrichment domain (org scan target picker)
-  useEffect(() => {
-    if (state.activeEnrichmentDomain && !selectedDomain) {
-      setSelectedDomain(state.activeEnrichmentDomain);
-    }
-  }, [state.activeEnrichmentDomain, selectedDomain]);
+  const [selectedDomainOverride, setSelectedDomain] = useState('');
+  const selectedDomain = selectedDomainOverride || state.activeEnrichmentDomain || '';
   const [scanRunning, setScanRunning] = useState(false);
   const persistedScanRunning = state.jobs.some(job =>
     job.job_type === 'dnstwist_only'
@@ -55,8 +49,8 @@ export function BrandProtectionTab() {
   ));
 
   const liveCount = lookalikes.filter(l => {
-    const d = (l.normalized_data || {}) as Record<string, any>;
-    return (d.resolved_ips || []).length > 0;
+    const resolved = l.normalized_data?.resolved_ips;
+    return Array.isArray(resolved) && resolved.length > 0;
   }).length;
 
   // Keep loading indicator active until new findings arrive or 120s timeout.
@@ -85,7 +79,7 @@ export function BrandProtectionTab() {
     }, 120_000);
     try {
       await apiClient.post(`/scans/${state.scan.id}/dnstwist`, { domain: selectedDomain });
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('dnstwist failed:', err);
       setScanRunning(false);
       dispatch({ type: 'DOMAIN_DEEP_ANALYSIS_COMPLETED', payload: {} });
@@ -172,8 +166,8 @@ export function BrandProtectionTab() {
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             {lookalikes.map(l => {
-              const d = (l.normalized_data || {}) as Record<string, any>;
-              const ips: string[] = d.resolved_ips || [];
+              const d = l.normalized_data || {};
+              const ips = Array.isArray(d.resolved_ips) ? d.resolved_ips.map(String) : [];
               const isLive = ips.length > 0;
               const isExpanded = expandedLookalike === l.id;
               return (
@@ -192,7 +186,7 @@ export function BrandProtectionTab() {
                     ) : (
                       <span className="badge badge-success" style={{ fontSize: 9 }}>NO DNS</span>
                     )}
-                    {d.permutation_type && <span className="badge badge-info" style={{ fontSize: 9 }}>{String(d.permutation_type)}</span>}
+                    {d.permutation_type != null && <span className="badge badge-info" style={{ fontSize: 9 }}>{String(d.permutation_type)}</span>}
                   </div>
                   {isExpanded && (
                     <div style={{ marginTop: 8, paddingLeft: 20, fontSize: 11, fontFamily: 'var(--font-mono)' }}>
@@ -202,19 +196,19 @@ export function BrandProtectionTab() {
                           <span style={{ color: 'var(--text-strong)' }}>{ips.slice(0, 5).join(', ')}{ips.length > 5 ? ` +${ips.length - 5} more` : ''}</span>
                         </div>
                       )}
-                      {d.http_status && (
+                      {d.http_status != null && (
                         <div style={{ marginBottom: 4 }}>
                           <span style={{ color: 'var(--text-muted)' }}>HTTP Status: </span>
                           <span style={{ color: 'var(--text-strong)' }}>{String(d.http_status)}</span>
                         </div>
                       )}
-                      {d.mx_records && (
+                      {d.mx_records != null && (
                         <div style={{ marginBottom: 4 }}>
                           <span style={{ color: 'var(--text-muted)' }}>MX: </span>
                           <span style={{ color: 'var(--text-strong)' }}>{String(d.mx_records)}</span>
                         </div>
                       )}
-                      {d.dns_records && (
+                      {d.dns_records != null && (
                         <div>
                           <span style={{ color: 'var(--text-muted)' }}>DNS: </span>
                           <span style={{ color: 'var(--text-strong)' }}>{String(d.dns_records)}</span>
@@ -238,7 +232,7 @@ export function BrandProtectionTab() {
           </h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {dorkResults.map(r => {
-              const nd = (r.normalized_data || {}) as Record<string, any>;
+              const nd = r.normalized_data || {};
               const title = String(nd.title || r.entity_value || '');
               const url = String(nd.url || nd.link || '');
               const snippet = String(nd.snippet || '');
@@ -294,10 +288,10 @@ export function BrandProtectionTab() {
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             {cloudBuckets.map(f => {
-              const nd = (f.normalized_data || {}) as Record<string, any>;
+              const nd = f.normalized_data || {};
               const url = String(nd.url || f.entity_value || '');
               const isBucket = f.entity_type === 'CLOUD_BUCKET';
-              const isPublic = nd.is_public;
+              const isPublic = nd.is_public === true;
               return (
                 <div key={f.id} style={{
                   padding: '9px 12px', borderRadius: 6,
@@ -314,7 +308,7 @@ export function BrandProtectionTab() {
                         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600, color: 'var(--text-strong)', wordBreak: 'break-all' }}>
                           {url}
                         </span>
-                        {isBucket && nd.provider && (
+                        {isBucket && nd.provider != null && (
                           <span className="badge" style={{ fontSize: 9, background: '#0ea5e920', color: '#0ea5e9', border: '1px solid #0ea5e940' }}>
                             {String(nd.provider)}
                           </span>
@@ -324,19 +318,19 @@ export function BrandProtectionTab() {
                             {isPublic ? 'PUBLIC' : 'RESTRICTED'}
                           </span>
                         )}
-                        {!isBucket && nd.file_type && (
+                        {!isBucket && nd.file_type != null && (
                           <span className="badge badge-warning" style={{ fontSize: 9 }}>
                             {String(nd.file_type)}
                           </span>
                         )}
                       </div>
-                      {isBucket && nd.status_code && (
+                      {isBucket && nd.status_code != null && (
                         <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-muted)' }}>
                           HTTP {String(nd.status_code)}
-                          {nd.bucket_name && <span> — bucket: <code style={{ fontSize: 10 }}>{String(nd.bucket_name)}</code></span>}
+                          {nd.bucket_name != null && <span> — bucket: <code style={{ fontSize: 10 }}>{String(nd.bucket_name)}</code></span>}
                         </div>
                       )}
-                      {!isBucket && nd.snippet && (
+                      {!isBucket && nd.snippet != null && (
                         <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-muted)', fontStyle: 'italic' }}>
                           {String(nd.snippet).length > 200 ? String(nd.snippet).slice(0, 200) + '…' : String(nd.snippet)}
                         </div>

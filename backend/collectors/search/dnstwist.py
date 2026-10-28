@@ -5,13 +5,16 @@ and checks which ones resolve to live IPs. Helps detect phishing domains,
 brand abuse, and attack surface expansion.
 
 Three-tier approach:
-  1. dnstwist Python library (most permutations, best detection)
+  1. dnstwist CLI (most permutations, best detection)
   2. dnstwist.io API fallback
   3. Local permutation generator + DNS resolution (always works)
 """
 from __future__ import annotations
 
 import asyncio
+import json
+import shutil
+import subprocess
 from typing import Any, Dict, List
 
 import httpx
@@ -29,10 +32,9 @@ class DnstwistCollector(BaseCollector):
     )
 
     async def collect(self, target: str) -> List[Dict[str, Any]]:
-        try:
-            import dnstwist
-            findings = await self._collect_with_library(target)
-        except ImportError:
+        if shutil.which("dnstwist"):
+            findings = await self._collect_with_cli(target)
+        else:
             findings = await self._collect_with_api(target)
 
         # Upgrade any lookalike that resolves (has live IPs) to a
@@ -54,13 +56,32 @@ class DnstwistCollector(BaseCollector):
                 upgraded.append(f)
         return upgraded
 
-    async def _collect_with_library(self, target: str) -> List[Dict[str, Any]]:
-        import dnstwist
+    async def _collect_with_cli(self, target: str) -> List[Dict[str, Any]]:
+        """Run dnstwist out of process so its formatter cannot flood worker logs."""
+        binary = shutil.which("dnstwist")
+        if not binary:
+            return []
         loop = asyncio.get_event_loop()
-        results = await loop.run_in_executor(
-            None,
-            lambda: dnstwist.run(domain=target, registered=True, format="json"),
-        )
+        try:
+            completed = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    [binary, "--registered", "--format", "json", target],
+                    capture_output=True,
+                    timeout=90.0,
+                    check=False,
+                ),
+            )
+        except subprocess.TimeoutExpired:
+            return []
+        if completed.returncode != 0:
+            return []
+        try:
+            results = json.loads(completed.stdout.decode(errors="replace"))
+        except (json.JSONDecodeError, UnicodeError):
+            return []
+        if not isinstance(results, list):
+            return []
         findings = []
         for r in results:
             domain = r.get("domain", "")

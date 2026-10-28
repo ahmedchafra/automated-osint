@@ -21,8 +21,10 @@ async def run(ctx: VectorContext) -> None:
     await ctx.commit()
 
     # ── Stage 2: dnstwist lookalike domain detection ───────────────────
-    dnstwist_collector = registry.get_collector("dnstwist")()
-    dnstwist_findings = await dnstwist_collector.execute(ctx.target_domain)
+    dnstwist_findings = []
+    if ctx.scan_mode != "passive":
+        dnstwist_collector = registry.get_collector("dnstwist")()
+        dnstwist_findings = await dnstwist_collector.execute(ctx.target_domain)
     dnstwist_count = len(dnstwist_findings)
     if dnstwist_findings:
         await ctx.persist(dnstwist_findings)

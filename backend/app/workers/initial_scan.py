@@ -14,9 +14,7 @@ runs in free-only mode (24 sources, no API keys) so it finishes in
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
-import re
 import time
 
 from app.workers.celery_app import celery_app
@@ -25,12 +23,18 @@ from app.workers.task_utils import _run, persist_findings
 from app.models.scan import Scan
 from app.services.progress import ScanProgressPublisher
 from app.services.asset_service import registrable_domain, upsert_asset
+from app.services.discovery import (
+    is_public_ip,
+    process_discovery_findings,
+    scoped_hostname,
+)
 from app.services.dns_validation import detect_wildcard_dns, matches_wildcard
 from app.services.http_validation import (
     HTTP_PROBE_CONCURRENCY,
     MAX_HTTP_PROBES,
     probe_http,
 )
+from app.services.scope import ScopeEvaluator
 from app.config import settings
 
 logger = logging.getLogger("osint.initial_scan")
@@ -40,6 +44,7 @@ ISOLATED_TOOLS = {"subfinder", "crtsh", "dns_resolver"}
 MAX_DISCOVERY_FINDINGS_PER_SOURCE = 1000
 MAX_WEB_SURFACE_TARGETS = 25
 WEB_SURFACE_CONCURRENCY = 5
+MAX_REGISTRY_IP_TARGETS = 25
 
 
 def _bounded_dns_candidates(
@@ -55,46 +60,22 @@ def _bounded_dns_candidates(
 
 def _valid_subdomain(value: str, root_domain: str) -> bool:
     """Return whether a discovered name is a syntactically valid child."""
-    value = value.strip().lower().rstrip(".")
-    root_domain = root_domain.strip().lower().rstrip(".")
-    if value.startswith("*."):
-        return False
-    if value != root_domain and not value.endswith("." + root_domain):
-        return False
-    if len(value) > 253:
-        return False
-    return all(
-        re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
-        is not None
-        for label in value.split(".")
-    )
+    return scoped_hostname(value, root_domain) is not None
 
 
 def _public_ip(value: str) -> bool:
-    try:
-        return ipaddress.ip_address(value.strip()).is_global
-    except ValueError:
-        return False
+    return is_public_ip(value)
 
 
 def _filter_discovery_findings(
     findings: list[dict], root_domain: str
 ) -> list[dict]:
-    """Reject malformed/out-of-scope discovery records and bound fan-out."""
-    filtered: list[dict] = []
-    for finding in findings:
-        entity_type = finding.get("entity_type")
-        entity_value = str(finding.get("entity_value", ""))
-        if entity_type == "SUBDOMAIN" and not _valid_subdomain(
-            entity_value, root_domain
-        ):
-            continue
-        if entity_type == "IP_ADDRESS" and not _public_ip(entity_value):
-            continue
-        filtered.append(finding)
-        if len(filtered) >= MAX_DISCOVERY_FINDINGS_PER_SOURCE:
-            break
-    return filtered
+    """Canonicalize, source-deduplicate, validate, and bound discovery."""
+    return process_discovery_findings(
+        findings,
+        root_domain=root_domain,
+        max_findings=MAX_DISCOVERY_FINDINGS_PER_SOURCE,
+    ).findings
 
 
 def _run_coro_in_thread(coro_factory, *args):
@@ -200,6 +181,39 @@ async def _run_tool(collector_name: str, target: str, scan_id: str,
         return []
 
 
+async def _run_registration_enrichment(
+    domain: str,
+    resolved_ips: set[str],
+    scan_id: str,
+    session,
+    publisher,
+) -> int:
+    """Persist WHOIS, RDAP, and RIPEstat data with bounded IP fan-out."""
+    created = 0
+    domain_results = await asyncio.gather(
+        _run_tool("whois_lookup", domain, scan_id, session, publisher),
+        _run_tool("rdap_lookup", domain, scan_id, session, publisher),
+    )
+    for findings in domain_results:
+        created += await persist_findings(session, scan_id, findings)
+
+    for index, ip in enumerate(sorted(resolved_ips)):
+        collectors = [
+            _run_tool("whois_lookup", ip, scan_id, session, publisher)
+        ]
+        if index < MAX_REGISTRY_IP_TARGETS:
+            collectors.append(
+                _run_tool("rdap_lookup", ip, scan_id, session, publisher)
+            )
+            collectors.append(
+                _run_tool("ripestat", ip, scan_id, session, publisher)
+            )
+        ip_results = await asyncio.gather(*collectors)
+        for findings in ip_results:
+            created += await persist_findings(session, scan_id, findings)
+    return created
+
+
 async def run_domain_scan(
     domain: str, scan_id: str, session, publisher,
     free_only: bool = True,
@@ -227,6 +241,13 @@ async def run_domain_scan(
     all_subdomains: set[str] = set()
     resolved_ips: set[str] = set()
     resolved_hosts: dict[str, list[str]] = {}
+    scan = await session.get(Scan, scan_id)
+    evaluator = ScopeEvaluator(
+        scan.scope_manifest if scan else None,
+        target_type="domain",
+        target=domain,
+    )
+    root_scope = evaluator.evaluate_hostname(domain)
 
     await upsert_asset(
         session,
@@ -235,6 +256,8 @@ async def run_domain_scan(
         value=domain,
         state="CANDIDATE",
         source_module="scan_target",
+        in_scope=root_scope.allowed,
+        scope_reason=root_scope.reason,
     )
 
     async def record_candidates(findings: list[dict]) -> None:
@@ -247,6 +270,9 @@ async def run_domain_scan(
             normalized = finding.setdefault("normalized_data", {})
             normalized["asset_state"] = "CANDIDATE"
             normalized["registrable_domain"] = registrable_domain(value)
+            decision = evaluator.evaluate_hostname(value)
+            normalized["in_scope"] = decision.allowed
+            normalized["scope_reason"] = decision.reason
             await upsert_asset(
                 session,
                 scan_id=scan_id,
@@ -254,6 +280,8 @@ async def run_domain_scan(
                 value=value,
                 state="CANDIDATE",
                 source_module=finding.get("source_module"),
+                in_scope=decision.allowed,
+                scope_reason=decision.reason,
             )
 
     # 1a. crt.sh — SSL certificate transparency logs
@@ -297,16 +325,39 @@ async def run_domain_scan(
         # those as evidence, but do not fan out into network enrichment until
         # our own DNS resolver verifies an association with this target.
 
+    # Common Crawl provides passive historical URLs and can reveal candidate
+    # subdomains. It performs one bounded, rate-limited latest-index query.
+    common_crawl_findings = _filter_discovery_findings(
+        await _run_tool("common_crawl", domain, scan_id, session, publisher),
+        domain,
+    )
+    await record_candidates(common_crawl_findings)
+    total_findings += await persist_findings(
+        session, scan_id, common_crawl_findings
+    )
+    for finding in common_crawl_findings:
+        if finding.get("entity_type") == "SUBDOMAIN":
+            value = str(finding.get("entity_value", ""))
+            if value:
+                all_subdomains.add(value)
+
+    # Assess the root domain once. This is recursive-DNS-only and remains
+    # available in passive mode; it does not connect to mail servers or fetch
+    # the MTA-STS HTTPS policy body.
+    posture_findings = await _run_tool(
+        "dns_email_posture", domain, scan_id, session, publisher
+    )
+    total_findings += await persist_findings(
+        session, scan_id, posture_findings
+    )
+
     if scan_mode == "passive":
         await publisher.publish(scan_id, "validation_skipped", {
             "reason": "passive_mode",
             "candidates": len(all_subdomains) + 1,
         })
-        whois_findings = await _run_tool(
-            "whois_lookup", domain, scan_id, session, publisher
-        )
-        total_findings += await persist_findings(
-            session, scan_id, whois_findings
+        total_findings += await _run_registration_enrichment(
+            domain, resolved_ips, scan_id, session, publisher
         )
         wayback_findings = await _run_tool(
             "wayback_machine", domain, scan_id, session, publisher
@@ -326,9 +377,11 @@ async def run_domain_scan(
 
     # Resolve candidates (bounded to 200 subdomains).
     from app.services.vectors.infrastructure import MAX_DNS_SUBDOMAINS, DNS_CONCURRENCY
-    subdomains_to_resolve = _bounded_dns_candidates(
-        domain, all_subdomains, MAX_DNS_SUBDOMAINS
-    )
+    subdomains_to_resolve = [
+        hostname for hostname in _bounded_dns_candidates(
+            domain, all_subdomains, MAX_DNS_SUBDOMAINS
+        ) if evaluator.evaluate_hostname(hostname).allowed
+    ]
 
     dns_findings_all = []
     semaphore = asyncio.Semaphore(DNS_CONCURRENCY)
@@ -349,7 +402,17 @@ async def run_domain_scan(
         wildcard_suspected = hostname != domain and matches_wildcard(f, wildcard)
         normalized["asset_state"] = "CANDIDATE" if wildcard_suspected else "RESOLVED"
         normalized["wildcard_suspected"] = wildcard_suspected
+        if wildcard_suspected:
+            from app.services.dns_validation import finding_dns_signature
+            signature = finding_dns_signature(f)
+            normalized["wildcard_evidence"] = {
+                "responsive_samples": wildcard.responsive_samples,
+                "matched_signatures": sorted(signature & wildcard.signatures),
+            }
         normalized["registrable_domain"] = registrable_domain(hostname)
+        host_scope = evaluator.evaluate_hostname(hostname)
+        normalized["in_scope"] = host_scope.allowed
+        normalized["scope_reason"] = host_scope.reason
         ips = normalized.get("resolved_ips", [])
         await upsert_asset(
             session,
@@ -361,6 +424,8 @@ async def run_domain_scan(
             wildcard_suspected=wildcard_suspected,
             dns_records=normalized.get("dns_records", {}),
             resolved_ips=ips,
+            in_scope=host_scope.allowed,
+            scope_reason=host_scope.reason,
         )
         if wildcard_suspected:
             continue
@@ -377,6 +442,8 @@ async def run_domain_scan(
                     value=ip,
                     state="RESOLVED",
                     source_module="dns_resolver",
+                    in_scope=host_scope.allowed,
+                    scope_reason="resolved from allowed hostname" if host_scope.allowed else host_scope.reason,
                 )
 
     total_findings += await persist_findings(session, scan_id, dns_findings_all)
@@ -415,7 +482,10 @@ async def run_domain_scan(
             state="LIVE",
             source_module="http_probe",
             http_metadata=metadata,
+            in_scope=True,
+            scope_reason="matches allowed domain",
         )
+        url_scope = evaluator.evaluate_url(metadata["url"])
         await upsert_asset(
             session,
             scan_id=scan_id,
@@ -424,6 +494,8 @@ async def run_domain_scan(
             state="LIVE",
             source_module="http_probe",
             http_metadata=metadata,
+            in_scope=url_scope.allowed,
+            scope_reason=url_scope.reason,
         )
         live_findings.append({
             "vector_type": "INFRASTRUCTURE",
@@ -492,12 +564,10 @@ async def run_domain_scan(
         shodan_findings = await _run_tool("shodan_internetdb", ip, scan_id, session, publisher)
         total_findings += await persist_findings(session, scan_id, shodan_findings)
 
-    # 1f. WhoIS / ASN Lookup on domain and all resolved IPs
-    whois_findings = await _run_tool("whois_lookup", domain, scan_id, session, publisher)
-    total_findings += await persist_findings(session, scan_id, whois_findings)
-    for ip in sorted(resolved_ips):
-        asn_findings = await _run_tool("whois_lookup", ip, scan_id, session, publisher)
-        total_findings += await persist_findings(session, scan_id, asn_findings)
+    # 1f. Registration and routing enrichment via WHOIS, RDAP, and RIPEstat.
+    total_findings += await _run_registration_enrichment(
+        domain, resolved_ips, scan_id, session, publisher
+    )
 
     return all_subdomains, resolved_ips, total_findings
 
@@ -522,13 +592,13 @@ async def _run_pipeline(scan_id: str) -> dict:
         total_findings = 0
 
         try:
-            phase_tools = ["crtsh", "subfinder", "theharvester"]
+            phase_tools = ["crtsh", "subfinder", "theharvester", "common_crawl", "dns_email_posture"]
             if scan.scan_mode != "passive":
                 phase_tools.extend([
                     "wildcard_dns", "dns_resolver", "http_probe",
                     "web_surface", "shodan_internetdb",
                 ])
-            phase_tools.extend(["wayback_machine", "whois_lookup"])
+            phase_tools.extend(["wayback_machine", "whois_lookup", "rdap_lookup", "ripestat"])
             await publisher.publish(scan_id, "phase_started", {
                 "phase": "INFRASTRUCTURE",
                 "phase_index": 1,

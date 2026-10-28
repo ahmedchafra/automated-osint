@@ -21,6 +21,7 @@ import { Link } from 'react-router-dom';
 import { formatDistanceToNow } from 'date-fns';
 import { useSearchParams } from 'react-router-dom';
 import { useState, useMemo, useRef, useEffect } from 'react';
+import { errorMessage } from '../utils/errors';
 
 const PAGE_SIZE = 50;
 
@@ -117,9 +118,8 @@ function ScanHistory() {
     try {
       await deleteScan(scanId);
       queryClient.invalidateQueries({ queryKey: ['scanHistory'] });
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || 'Failed to delete scan.';
-      setDeleteError(detail);
+    } catch (err: unknown) {
+      setDeleteError(errorMessage(err, 'Failed to delete scan.'));
     } finally {
       setDeleting(null);
       setConfirmDelete(null);
@@ -132,9 +132,8 @@ function ScanHistory() {
     try {
       await cancelScan(scanId);
       queryClient.invalidateQueries({ queryKey: ['scanHistory'] });
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || 'Failed to cancel scan.';
-      setDeleteError(detail);
+    } catch (err: unknown) {
+      setDeleteError(errorMessage(err, 'Failed to cancel scan.'));
     } finally {
       setCancelling(null);
     }

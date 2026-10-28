@@ -2,7 +2,8 @@ import { useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Radio, Eye, EyeOff, Loader2, AlertCircle, ChevronRight, Clock } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/auth-state';
+import { errorMessage } from '../utils/errors';
 
 export default function Register() {
   const { register } = useAuth();
@@ -47,10 +48,8 @@ export default function Register() {
       await register(username.trim(), email.trim(), password);
       // Show pending approval message instead of redirecting
       setRegistered(true);
-    } catch (err: any) {
-      const detail =
-        err?.response?.data?.detail || 'Registration failed. Please try again.';
-      setError(detail);
+    } catch (err: unknown) {
+      setError(errorMessage(err, 'Registration failed. Please try again.'));
     } finally {
       setIsSubmitting(false);
     }

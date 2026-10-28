@@ -75,8 +75,13 @@ async def run(ctx: VectorContext) -> None:
         if finding.get("entity_value")
     }
 
-    # ── Stage 1b: Construct emails from subdomains with MX records ────────
-    constructed = await _construct_subdomain_emails(ctx)
+    # MX resolution interacts with target-controlled DNS, so passive scans use
+    # only addresses returned by third-party sources such as Hunter.
+    constructed = (
+        await _construct_subdomain_emails(ctx)
+        if ctx.scan_mode != "passive"
+        else set()
+    )
     emails.update(constructed)
 
     # ── Stage 2: XposedOrNot breach lookup per email ─────────────────────
@@ -86,19 +91,11 @@ async def run(ctx: VectorContext) -> None:
     # → sleep 10 minutes to let the window drain before continuing.
     xposed = registry.get_collector("xposedornot_breach")()
     breach_count = 0
-    consecutive_empty = 0
     for email in sorted(emails):
         breach_findings = await xposed.execute(email)
         if breach_findings:
-            consecutive_empty = 0
             breach_count += len(breach_findings)
             await ctx.persist(breach_findings)
-        else:
-            consecutive_empty += 1
-            if consecutive_empty >= 3:
-                consecutive_empty = 0
-                await asyncio.sleep(600)  # 10-minute cooldown
-                await ctx.publish("identity_rate_limit_cooldown", email=email)
     await ctx.commit()
 
     # ── Stage 2b: h8mail breach/reputation check per email ────────────────
@@ -114,13 +111,14 @@ async def run(ctx: VectorContext) -> None:
     await ctx.commit()
 
     # ── Stage 3: Holehe platform registration check per email ─────────────
-    holehe = registry.get_collector("holehe")()
     platform_count = 0
-    for email in sorted(emails):
-        platform_findings = await holehe.execute(email)
-        platform_count += len(platform_findings)
-        if platform_findings:
-            await ctx.persist(platform_findings)
+    if ctx.scan_mode != "passive":
+        holehe = registry.get_collector("holehe")()
+        for email in sorted(emails):
+            platform_findings = await holehe.execute(email)
+            platform_count += len(platform_findings)
+            if platform_findings:
+                await ctx.persist(platform_findings)
     await ctx.commit()
 
     # ── Stage 4: GitHub leaked secrets scan ───────────────────────────────

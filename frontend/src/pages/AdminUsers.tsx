@@ -7,6 +7,7 @@ import {
   Clock, UserPlus, Trash2,
 } from 'lucide-react';
 import apiClient from '../api/client';
+import { errorMessage } from '../utils/errors';
 
 interface UserRow {
   id: string;
@@ -47,9 +48,8 @@ export default function AdminUsers() {
       await apiClient.patch(`/admin/users/${userId}/role`, { role: newRole });
       queryClient.invalidateQueries({ queryKey: ['adminUsers'] });
       setActionMsg({ ok: true, text: `Role changed to ${newRole}` });
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || 'Failed to update role';
-      setActionMsg({ ok: false, text: detail });
+    } catch (error: unknown) {
+      setActionMsg({ ok: false, text: errorMessage(error, 'Failed to update role') });
     }
     setTimeout(() => setActionMsg(null), 4000);
   };
@@ -64,9 +64,8 @@ export default function AdminUsers() {
         ok: true,
         text: `User ${currentStatus ? 'deactivated' : 'activated'}`,
       });
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || 'Failed to update status';
-      setActionMsg({ ok: false, text: detail });
+    } catch (error: unknown) {
+      setActionMsg({ ok: false, text: errorMessage(error, 'Failed to update status') });
     }
     setTimeout(() => setActionMsg(null), 4000);
   };
@@ -78,9 +77,8 @@ export default function AdminUsers() {
       queryClient.invalidateQueries({ queryKey: ['adminUsers'] });
       queryClient.invalidateQueries({ queryKey: ['adminPendingUsers'] });
       setActionMsg({ ok: true, text: 'User approved and activated' });
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || 'Failed to approve user';
-      setActionMsg({ ok: false, text: detail });
+    } catch (error: unknown) {
+      setActionMsg({ ok: false, text: errorMessage(error, 'Failed to approve user') });
     }
     setTimeout(() => setActionMsg(null), 4000);
   };
@@ -93,9 +91,8 @@ export default function AdminUsers() {
       queryClient.invalidateQueries({ queryKey: ['adminUsers'] });
       queryClient.invalidateQueries({ queryKey: ['adminPendingUsers'] });
       setActionMsg({ ok: true, text: 'User deleted' });
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || 'Failed to delete user';
-      setActionMsg({ ok: false, text: detail });
+    } catch (error: unknown) {
+      setActionMsg({ ok: false, text: errorMessage(error, 'Failed to delete user') });
     } finally {
       setDeletingUser(null);
     }

@@ -2,7 +2,7 @@ from typing import Optional
 
 from app.workers.celery_app import celery_app
 from app.database import AsyncSessionLocal
-from app.workers.task_utils import _run
+from app.workers.task_utils import _run, persist_findings
 from app.services.ai_service import AIService
 from collectors.registry import registry
 from app.models.ai_query import AIQuery
@@ -49,32 +49,14 @@ def run_ai_dork_task(self, scan_id: str, user_prompt: str):
             # 5. Persist the search results as DORK_RESULT findings so the
             # findings table, correlation engine, and exports all see them
             # the same way they see any other collector output.
-            from app.models.finding import Finding
-            for finding in search_results:
-                finding_copy = finding.copy()
-                finding_copy["scan_id"] = scan_id
-                if "entity_type" not in finding_copy:
-                    finding_copy["entity_type"] = "DORK_RESULT"
-                if "entity_value" not in finding_copy:
-                    finding_copy["entity_value"] = finding_copy.get("link", "") or finding_copy.get("url", "")
-                if "severity" not in finding_copy:
-                    finding_copy["severity"] = "INFO"
-                if "confidence" not in finding_copy:
-                    finding_copy["confidence"] = 0.7
-                if "source_module" not in finding_copy:
-                    finding_copy["source_module"] = "serper_dork_search"
-                if "vector_type" not in finding_copy:
-                    finding_copy["vector_type"] = "SEARCH"
-                if "normalized_data" not in finding_copy:
-                    finding_copy["normalized_data"] = {
-                        "title": finding_copy.get("title"),
-                        "url": finding_copy.get("link"),
-                        "snippet": finding_copy.get("snippet"),
-                        "query": dork,
-                        "position": finding_copy.get("position"),
-                    }
-                session.add(Finding(**finding_copy))
-            await session.flush()
+            await persist_findings(
+                session,
+                scan_id,
+                search_results,
+                default_vector="SEARCH",
+                default_severity="INFO",
+                default_confidence=0.7,
+            )
 
             # 6. Store an AIQuery record for the AIAssistant UI timeline.
             ai_query = AIQuery(

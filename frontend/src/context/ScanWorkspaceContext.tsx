@@ -1,8 +1,10 @@
-import { createContext, useContext, useReducer, type ReactNode, type Dispatch } from 'react';
+import { useReducer, type ReactNode } from 'react';
 import type { LogEvent } from '../components/EventLog';
 import type { FindingRow } from '../components/FindingsTable';
+import type { Asset, Scan, ScanJob as ApiScanJob } from '../types/api';
+import { ScanWorkspaceStateContext } from './scan-workspace-state';
 
-export type TabId = 'infrastructure' | 'identity' | 'secrets' | 'threat-intel' | 'brand' | 'web-osint';
+export type TabId = 'overview' | 'evidence' | 'infrastructure' | 'identity' | 'secrets' | 'threat-intel' | 'brand' | 'web-osint';
 
 export interface DomainDeepAnalysisProgress {
   collector: string;
@@ -27,50 +29,12 @@ export interface EmailDeepAnalysisProgress {
   error?: string;
 }
 
-export interface ScanJob {
-  id: string;
-  scan_id: string;
-  celery_task_id: string;
-  job_type: string;
-  stage: string;
-  status: 'QUEUED' | 'RUNNING' | 'RETRYING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
-  input_type?: string | null;
-  input_value?: string | null;
-  progress: {
-    event?: string;
-    payload?: Record<string, unknown>;
-    updated_at?: string;
-  };
-  result_summary: Record<string, unknown>;
-  error?: string | null;
-  created_at: string;
-  started_at?: string | null;
-  completed_at?: string | null;
-  updated_at: string;
-}
-
-export interface AssetRecord {
-  id: string;
-  scan_id: string;
-  asset_type: string;
-  value: string;
-  canonical_value: string;
-  registrable_domain?: string | null;
-  state: 'CANDIDATE' | 'RESOLVED' | 'LIVE';
-  in_scope: boolean;
-  wildcard_suspected: boolean;
-  source_modules: string[];
-  evidence_count: number;
-  dns_records: Record<string, unknown>;
-  resolved_ips: string[];
-  http_metadata: Record<string, unknown>;
-  created_at: string;
-  last_observed_at: string;
-  updated_at: string;
-}
+export type ScanJob = ApiScanJob;
+export type AssetRecord = Asset;
+export type ScanRecord = Scan;
 
 export interface ScanWorkspaceState {
-  scan: any | null;
+  scan: ScanRecord | null;
   findings: FindingRow[];
   jobs: ScanJob[];
   assets: AssetRecord[];
@@ -104,16 +68,16 @@ export interface ScanWorkspaceState {
 }
 
 export type ScanWorkspaceAction =
-  | { type: 'SCAN_LOADED'; scan: any; payload?: any }
+  | { type: 'SCAN_LOADED'; scan: ScanRecord; payload?: unknown }
   | { type: 'SET_TOTAL_VECTORS'; total: number }
-  | { type: 'FINDINGS_UPDATED'; findings: FindingRow[]; payload?: any }
+  | { type: 'FINDINGS_UPDATED'; findings: FindingRow[]; payload?: unknown }
   | { type: 'JOBS_UPDATED'; jobs: ScanJob[] }
   | { type: 'ASSETS_UPDATED'; assets: AssetRecord[] }
-  | { type: 'FINDING_PUSHED'; finding: FindingRow; payload?: any }
+  | { type: 'FINDING_PUSHED'; finding: FindingRow; payload?: unknown }
   | { type: 'WS_CONNECTED' }
   | { type: 'WS_DISCONNECTED' }
   | { type: 'VECTOR_COMPLETED'; vector: string; stage?: string; findingsCreated?: number }
-  | { type: 'EVENT_LOG'; event: LogEvent; payload?: any }
+  | { type: 'EVENT_LOG'; event: LogEvent; payload?: unknown }
   | { type: 'TAB_CHANGED'; tab: TabId }
   | { type: 'FILTERS_CHANGED'; filters: Partial<ScanWorkspaceState['filters']> }
   | { type: 'ENTITY_TYPES_CHANGED'; types: string[] }
@@ -123,14 +87,14 @@ export type ScanWorkspaceAction =
   | { type: 'PIVOT_RESET' }
   | { type: 'SET_TAB'; tab: TabId }
   | { type: 'DOMAIN_DEEP_ANALYSIS_STARTED'; domain: string; collectors?: string[] }
-  | { type: 'DOMAIN_DEEP_ANALYSIS_PROGRESS'; payload: any }
-  | { type: 'DOMAIN_DEEP_ANALYSIS_COMPLETED'; payload: any }
+  | { type: 'DOMAIN_DEEP_ANALYSIS_PROGRESS'; payload: DomainDeepAnalysisProgress }
+  | { type: 'DOMAIN_DEEP_ANALYSIS_COMPLETED'; payload?: unknown }
   | { type: 'EMAIL_DEEP_ANALYSIS_STARTED'; emails: string[] }
-  | { type: 'EMAIL_DEEP_ANALYSIS_PROGRESS'; payload: any }
-  | { type: 'EMAIL_DEEP_ANALYSIS_COMPLETED'; payload: any }
+  | { type: 'EMAIL_DEEP_ANALYSIS_PROGRESS'; payload: EmailDeepAnalysisProgress }
+  | { type: 'EMAIL_DEEP_ANALYSIS_COMPLETED'; payload?: unknown }
   | { type: 'BREACH_CHECK_STARTED'; emails: string[] }
-  | { type: 'BREACH_CHECK_PROGRESS'; payload: any }
-  | { type: 'BREACH_CHECK_COMPLETED'; payload: any }
+  | { type: 'BREACH_CHECK_PROGRESS'; payload: ScanWorkspaceState['breachCheckProgress'][number] }
+  | { type: 'BREACH_CHECK_COMPLETED'; payload?: unknown }
   | { type: 'SET_ENRICHMENT_DOMAIN'; domain: string | null }
   | { type: 'DOMAIN_DEEP_ANALYSIS_CLOSED' };
 
@@ -140,7 +104,7 @@ const INITIAL_STATE: ScanWorkspaceState = {
   jobs: [],
   assets: [],
   wsConnected: false,
-  activeTab: 'infrastructure',
+  activeTab: 'overview',
   eventLog: [],
   completedVectors: [],
   totalVectors: 0,
@@ -281,20 +245,11 @@ function reducer(state: ScanWorkspaceState, action: ScanWorkspaceAction): ScanWo
   }
 }
 
-const ScanWorkspaceContext = createContext<{
-  state: ScanWorkspaceState;
-  dispatch: Dispatch<ScanWorkspaceAction>;
-}>({ state: INITIAL_STATE, dispatch: () => {} });
-
 export function ScanWorkspaceProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
   return (
-    <ScanWorkspaceContext.Provider value={{ state, dispatch }}>
+    <ScanWorkspaceStateContext.Provider value={{ state, dispatch }}>
       {children}
-    </ScanWorkspaceContext.Provider>
+    </ScanWorkspaceStateContext.Provider>
   );
-}
-
-export function useScanWorkspace() {
-  return useContext(ScanWorkspaceContext);
 }

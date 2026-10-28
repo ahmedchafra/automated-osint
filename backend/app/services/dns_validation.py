@@ -79,4 +79,7 @@ def matches_wildcard(finding: dict, wildcard: WildcardDnsResult) -> bool:
     if not wildcard.detected:
         return False
     signature = finding_dns_signature(finding)
-    return bool(signature and signature.intersection(wildcard.signatures))
+    # A shared CDN address alone is not sufficient evidence. Classify the
+    # candidate only when every observed DNS record is explained by the
+    # wildcard samples; a distinct CNAME/address keeps it eligible.
+    return bool(signature and signature.issubset(wildcard.signatures))

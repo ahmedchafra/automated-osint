@@ -1,11 +1,13 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo } from 'react';
+import { isAxiosError } from 'axios';
 import { MessageCircle, Globe, Loader2, Search } from 'lucide-react';
-import { useScanWorkspace } from '../../context/ScanWorkspaceContext';
+import { useScanWorkspace } from '../../context/scan-workspace-state';
 import apiClient from '../../api/client';
 
 export function ThreatIntelTab() {
   const { state } = useScanWorkspace();
-  const [selectedDomain, setSelectedDomain] = useState<string>(state.activeEnrichmentDomain || '');
+  const [selectedDomainOverride, setSelectedDomain] = useState('');
+  const selectedDomain = selectedDomainOverride || state.activeEnrichmentDomain || '';
   const [telegramKeyword, setTelegramKeyword] = useState<string>('');
   const [activeAction, setActiveAction] = useState<string | null>(null);
   const persistedAction = (() => {
@@ -22,13 +24,6 @@ export function ThreatIntelTab() {
     }[activeJob.job_type] || null;
   })();
   const currentAction = activeAction || persistedAction;
-
-  // Sync with active enrichment domain (org scan target picker)
-  useEffect(() => {
-    if (state.activeEnrichmentDomain && !selectedDomain) {
-      setSelectedDomain(state.activeEnrichmentDomain);
-    }
-  }, [state.activeEnrichmentDomain, selectedDomain]);
 
   // Threat Intel is the operations center: actions live here, and only
   // channels / messages / dark-web findings are displayed. Leaked secrets
@@ -65,7 +60,7 @@ export function ThreatIntelTab() {
     setActiveAction('dnstwist');
     try {
       await apiClient.post(`/scans/${state.scan.id}/dnstwist`, { domain: selectedDomain });
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('dnstwist failed:', err);
     } finally {
       setActiveAction(null);
@@ -77,7 +72,7 @@ export function ThreatIntelTab() {
     setActiveAction('secrets');
     try {
       await apiClient.post(`/scans/${state.scan.id}/secrets-scan`, { domain: selectedDomain });
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Secrets scan failed:', err);
     } finally {
       setActiveAction(null);
@@ -92,7 +87,7 @@ export function ThreatIntelTab() {
         domain: selectedDomain,
         keyword: domainKeyword,
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Telegram monitor failed:', err);
     } finally {
       setActiveAction(null);
@@ -104,9 +99,9 @@ export function ThreatIntelTab() {
     setActiveAction('ahmia');
     try {
       await apiClient.post(`/scans/${state.scan.id}/ahmia-search`, { domain: selectedDomain });
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Endpoint may not exist yet — fall back gracefully
-      console.warn('Ahmia search endpoint not available:', err?.response?.status);
+      console.warn('Ahmia search endpoint not available:', isAxiosError(err) ? err.response?.status : err);
     } finally {
       setActiveAction(null);
     }

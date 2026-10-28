@@ -1,24 +1,8 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
-
-export interface NotificationItem {
-  id: string;
-  type: 'success' | 'error' | 'info';
-  title: string;
-  message: string;
-  timestamp: number;
-}
-
-interface NotificationContextValue {
-  notifications: NotificationItem[];
-  addNotification: (n: Omit<NotificationItem, 'id' | 'timestamp'>) => void;
-  dismissNotification: (id: string) => void;
-}
-
-const NotificationContext = createContext<NotificationContextValue>({
-  notifications: [],
-  addNotification: () => {},
-  dismissNotification: () => {},
-});
+import { useState, useCallback, type ReactNode } from 'react';
+import {
+  NotificationStateContext,
+  type NotificationItem,
+} from './notification-state';
 
 let _nextId = 0;
 const MAX_VISIBLE = 5;
@@ -47,12 +31,8 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <NotificationContext.Provider value={{ notifications, addNotification, dismissNotification }}>
+    <NotificationStateContext.Provider value={{ notifications, addNotification, dismissNotification }}>
       {children}
-    </NotificationContext.Provider>
+    </NotificationStateContext.Provider>
   );
-}
-
-export function useNotification() {
-  return useContext(NotificationContext);
 }

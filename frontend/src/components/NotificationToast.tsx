@@ -1,6 +1,6 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import { CheckCircle2, AlertTriangle, Info, X } from 'lucide-react';
-import { useNotification, type NotificationItem } from '../context/NotificationContext';
+import { useNotification, type NotificationItem } from '../context/notification-state';
 
 const ICON_MAP: Record<NotificationItem['type'], typeof CheckCircle2> = {
   success: CheckCircle2,

@@ -1,19 +1,8 @@
 import type { ReactNode } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
+import type { Finding } from '../types/api';
 
-export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO';
-
-export interface FindingRow {
-  id: string;
-  entity_type: string;
-  entity_value: string;
-  severity: string;
-  source_module: string;
-  confidence: number;
-  vector_type: string;
-  raw_data?: Record<string, unknown>;
-  normalized_data?: Record<string, unknown>;
-}
+export type FindingRow = Finding;
 
 interface SeverityBadgeProps {
   severity: string;

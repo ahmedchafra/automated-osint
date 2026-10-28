@@ -7,7 +7,7 @@ discovers a domain.
 Pipeline order:
   Phase 1: Reverse DNS (PTR lookup) → discover domains
   Phase 1b: Shodan InternetDB (free) → open ports, services, CVEs
-  Phase 2: WhoIS / ASN Lookup
+  Phase 2: RDAP + WhoIS / ASN Lookup
   Phase 3: Shodan Host + Censys Host → detailed port/service intel
   Phase 4: NVD CVE + CISA KEV (from discovered CPEs/CVEs)
   Phase 5: Serper search → dork results on IP
@@ -24,8 +24,10 @@ from concurrent.futures import ThreadPoolExecutor
 from app.workers.celery_app import celery_app
 from app.database import AsyncSessionLocal
 from app.workers.task_utils import _run, persist_findings
+from app.services.discovery import process_discovery_findings
 from app.models.scan import Scan
 from app.services.progress import ScanProgressPublisher
+from app.services.scope import ScopeEvaluator
 
 TOOL_WATCHDOG_SECONDS = 300
 ISOLATED_TOOLS = {"subfinder", "crtsh", "dns_resolver"}
@@ -106,6 +108,7 @@ async def _run_ip_pipeline(scan_id: str) -> dict:
 
         publisher = ScanProgressPublisher()
         target_ip = scan.target_domain  # holds the IP address
+        scope = ScopeEvaluator(scan.scope_manifest, target_type="ip", target=target_ip)
         scan.status = "RUNNING"
         await session.commit()
 
@@ -129,17 +132,22 @@ async def _run_ip_pipeline(scan_id: str) -> dict:
                 value=target_ip,
                 state="RESOLVED",
                 source_module="scan_target",
+                in_scope=True,
+                scope_reason="matches allowed CIDR",
             )
 
             # ─── PHASE 1: REVERSE DNS ──────────────────────────────────────
             await publisher.publish(scan_id, "phase_started", {
                 "phase": "INFRASTRUCTURE",
                 "phase_index": 1,
-                "tools": ["reverse_dns", "shodan_internetdb", "whois_lookup"],
+                "tools": ["reverse_dns", "shodan_internetdb", "whois_lookup", "rdap_lookup", "ripestat"],
             })
 
             # 1a. Reverse DNS — IP → domain names
-            rdns_findings = await _run_tool("reverse_dns", target_ip, scan_id, session, publisher, thread_pool)
+            rdns_findings = process_discovery_findings(
+                await _run_tool("reverse_dns", target_ip, scan_id, session, publisher, thread_pool),
+                hostname_entity_types=frozenset({"DOMAIN_METADATA"}),
+            ).findings
             for finding in rdns_findings:
                 value = str(finding.get("entity_value", ""))
                 if not value:
@@ -147,6 +155,9 @@ async def _run_ip_pipeline(scan_id: str) -> dict:
                 normalized = finding.setdefault("normalized_data", {})
                 normalized["asset_state"] = "CANDIDATE"
                 normalized["registrable_domain"] = registrable_domain(value)
+                decision = scope.evaluate_hostname(value)
+                normalized["in_scope"] = decision.allowed
+                normalized["scope_reason"] = decision.reason
                 await upsert_asset(
                     session,
                     scan_id=scan_id,
@@ -154,6 +165,8 @@ async def _run_ip_pipeline(scan_id: str) -> dict:
                     value=value,
                     state="CANDIDATE",
                     source_module="reverse_dns",
+                    in_scope=decision.allowed,
+                    scope_reason=decision.reason,
                 )
             total_findings += await persist_findings(session, scan_id, rdns_findings)
             for f in rdns_findings:
@@ -169,9 +182,14 @@ async def _run_ip_pipeline(scan_id: str) -> dict:
                 if ev and f.get("entity_type") == "IP_ADDRESS":
                     resolved_ips.add(ev)
 
-            # 1c. WhoIS/ASN lookup on the IP
-            asn_findings = await _run_tool("whois_lookup", target_ip, scan_id, session, publisher, thread_pool)
-            total_findings += await persist_findings(session, scan_id, asn_findings)
+            # 1c. Registration and routing enrichment on the IP.
+            registration_results = await asyncio.gather(
+                _run_tool("whois_lookup", target_ip, scan_id, session, publisher, thread_pool),
+                _run_tool("rdap_lookup", target_ip, scan_id, session, publisher, thread_pool),
+                _run_tool("ripestat", target_ip, scan_id, session, publisher, thread_pool),
+            )
+            for findings in registration_results:
+                total_findings += await persist_findings(session, scan_id, findings)
 
             await session.commit()
             infra_results = {
@@ -249,15 +267,19 @@ async def _run_ip_pipeline(scan_id: str) -> dict:
             # ─── PHASE 4: DOMAIN CONVERGENCE ──────────────────────────────
             # If reverse DNS found domains, run the standard 6-tool domain
             # infrastructure scan on each discovered domain.
-            if discovered_domains:
+            approved_domains = {
+                domain for domain in discovered_domains
+                if scope.evaluate_hostname(domain).allowed
+            }
+            if approved_domains:
                 await publisher.publish(scan_id, "phase_started", {
                     "phase": "IDENTITY", "phase_index": 4,
-                    "tools": ["crtsh", "subfinder", "theharvester", "dns_resolver", "shodan_internetdb", "whois_lookup"],
+                    "tools": ["crtsh", "subfinder", "theharvester", "common_crawl", "dns_email_posture", "dns_resolver", "shodan_internetdb", "whois_lookup", "rdap_lookup", "ripestat"],
                 })
 
                 from app.workers.initial_scan import run_domain_scan
 
-                for domain in sorted(discovered_domains):
+                for domain in sorted(approved_domains):
                     subs, ips, tool_findings = await run_domain_scan(
                         domain, scan_id, session, publisher, free_only=True,
                         scan_mode=scan.scan_mode,
@@ -267,7 +289,13 @@ async def _run_ip_pipeline(scan_id: str) -> dict:
                 await session.commit()
                 await publisher.publish(scan_id, "phase_completed", {
                     "phase": "IDENTITY", "phase_index": 4,
-                    "result": {"domains_from_ptr": len(discovered_domains), "findings": total_findings},
+                    "result": {"domains_from_ptr": len(approved_domains), "findings": total_findings},
+                })
+            elif discovered_domains:
+                await publisher.publish(scan_id, "scope_blocked", {
+                    "stage": "domain_convergence",
+                    "assets": len(discovered_domains),
+                    "reason": "PTR domains require manual scope inclusion",
                 })
 
             # ─── CORRELATION ───────────────────────────────────────────────

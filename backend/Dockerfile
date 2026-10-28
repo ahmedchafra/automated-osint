@@ -13,6 +13,7 @@ RUN apt-get update \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m playwright install --with-deps chromium
 
 # Bake external tools into the image so container startup does not depend on
 # GitHub availability or a moving upstream branch. theHarvester 4.11.1 is the

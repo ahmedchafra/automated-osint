@@ -3,17 +3,11 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { motion, AnimatePresence } from 'framer-motion';
 import { formatDistanceToNow } from 'date-fns';
+import cytoscape from 'cytoscape';
 import apiClient from '../api/client';
 import { ChevronRight, Filter, MapPin, Maximize2, Scan, X, ZoomIn, ZoomOut, Network, AlertTriangle } from 'lucide-react';
 import type { FindingRow } from '../components/FindingsTable';
-// cytoscape is loaded from a CDN in index.html and available as a global.
-// The `external` entry in vite.config.ts keeps it out of the bundle.
 /* eslint-disable @typescript-eslint/no-explicit-any */
-
-/** Returns the cytoscape constructor if the CDN has loaded, null otherwise. */
-function getCyInstance(): any {
-  return (window as any).cytoscape ?? null;
-}
 
 interface EntityLink {
   id: string;
@@ -210,23 +204,6 @@ function EntityGraph({ scanId }: EntityGraphProps) {
   const [layoutName, setLayoutName] = useState<'cose' | 'circle' | 'grid' | 'breadthfirst'>('cose');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [linkTypeFilter, setLinkTypeFilter] = useState<Set<string>>(new Set());
-  const [cyLoaded, setCyLoaded] = useState(!!getCyInstance());
-
-  /* If the cytoscape CDN hasn't loaded yet, poll a few times. The script
-     tag is in index.html <head>, so it should be ready by the time React
-     hydrates, but network-delayed CDNs can arrive after the first paint. */
-  useEffect(() => {
-    if (cyLoaded) return;
-    const timer = setInterval(() => {
-      if (getCyInstance()) {
-        setCyLoaded(true);
-        clearInterval(timer);
-      }
-    }, 200);
-    // Stop after 10s so we don't poll forever
-    const safety = setTimeout(() => clearInterval(timer), 10_000);
-    return () => { clearInterval(timer); clearTimeout(safety); };
-  }, [cyLoaded]);
 
   const { data: links, error: linksError } = useQuery<EntityLink[]>({
     queryKey: ['entity-links', actualScanId],
@@ -255,7 +232,11 @@ function EntityGraph({ scanId }: EntityGraphProps) {
 
   useEffect(() => {
     if (linkTypeFilter.size === 0 && availableLinkTypes.length > 0) {
-      setLinkTypeFilter(new Set(availableLinkTypes));
+      const timer = window.setTimeout(
+        () => setLinkTypeFilter(new Set(availableLinkTypes)),
+        0,
+      );
+      return () => window.clearTimeout(timer);
     }
   }, [availableLinkTypes, linkTypeFilter.size]);
 
@@ -341,10 +322,7 @@ function EntityGraph({ scanId }: EntityGraphProps) {
       cyRef.current = null;
     }
 
-    const cyConstructor = getCyInstance();
-    if (!cyConstructor) return; // CDN not loaded yet — the polling effect catches this
-
-    cyRef.current = cyConstructor({
+    const cy: any = cytoscape({
       container: containerRef.current,
       elements,
       style: [
@@ -398,10 +376,11 @@ function EntityGraph({ scanId }: EntityGraphProps) {
             },
           },
         ],
-        layout: { name: layoutName, animate: true, animationDuration: 500 } as any,
+        // Animated layouts can keep scheduling position updates after React
+        // unmounts the canvas. A synchronous layout makes teardown reliable.
+        layout: { name: layoutName, animate: false } as any,
       });
-
-      const cy = cyRef.current;
+      cyRef.current = cy;
       cy.on('tap', 'node', (evt: { target: { id: () => string } }) => {
         const nodeId = evt.target.id();
         if (nodeId.startsWith('n-')) {
@@ -414,8 +393,9 @@ function EntityGraph({ scanId }: EntityGraphProps) {
       });
 
     return () => {
-      cyRef.current?.destroy();
-      cyRef.current = null;
+      cy.stop();
+      cy.destroy();
+      if (cyRef.current === cy) cyRef.current = null;
     };
   }, [links, findings, layoutName, filteredLinks, findingsMap]);
 
@@ -839,31 +819,7 @@ function EntityGraph({ scanId }: EntityGraphProps) {
         )}
       </motion.div>
 
-      {!cyLoaded && !getCyInstance() ? (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="card text-center py-8"
-          style={{ color: 'var(--text-muted)' }}
-        >
-          <div style={{
-            display: 'inline-flex', alignItems: 'center', gap: 'var(--space-3)',
-            padding: 'var(--space-4) var(--space-6)',
-            background: 'var(--glass-bg)', borderRadius: 'var(--radius-lg)',
-            border: '1px solid var(--glass-border)',
-            backdropFilter: 'blur(12px)',
-          }}>
-            <div style={{
-              width: 18, height: 18,
-              border: '2px solid var(--border-medium)', borderTopColor: 'var(--accent)',
-              borderRadius: '50%', animation: 'spin 0.8s linear infinite',
-            }} />
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-sm)' }}>
-              Loading graph renderer&hellip;
-            </span>
-          </div>
-        </motion.div>
-      ) : hasError ? (
+      {hasError ? (
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}

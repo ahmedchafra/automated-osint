@@ -139,6 +139,13 @@ async def get_authenticated_user(
             db.add(api_user)
             await db.commit()
             await db.refresh(api_user)
+        elif api_user.role != "admin" or not api_user.is_active:
+            # Reconcile installations that created the reserved development
+            # user before API-key auth was given an explicit admin role.
+            api_user.role = "admin"
+            api_user.is_active = True
+            await db.commit()
+            await db.refresh(api_user)
         return api_user
 
     # Try JWT bearer token (used by frontend)

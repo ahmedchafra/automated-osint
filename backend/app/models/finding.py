@@ -1,4 +1,6 @@
-from sqlalchemy import Column, Float, ForeignKey, JSON, String, Text, UniqueConstraint
+from datetime import datetime, timezone
+
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlalchemy.orm import relationship
 
@@ -22,6 +24,15 @@ class Finding(BaseModel):
     raw_data = Column(JSON, nullable=False, default=dict)
     normalized_data = Column(JSON, nullable=False, default=dict)
     tags = Column(JSON, nullable=True, default=list) # SQLite doesn't have ARRAY, so use JSON
+    first_seen_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    last_seen_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True
+    )
+    observation_count = Column(Integer, nullable=False, default=1)
+    revision = Column(Integer, nullable=False, default=1)
+    last_observed_for = Column(String, nullable=True)
 
     # Mirrors the Alembic migration `20260620_0003_add_tsvector_to_findings`.
     # Postgres-only; ignored on SQLite (no full-text search there). The

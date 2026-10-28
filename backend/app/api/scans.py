@@ -1,6 +1,7 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_
 from sqlalchemy.orm import selectinload
@@ -13,10 +14,13 @@ from app.models.finding import Finding
 from app.models.scan_collaborator import ScanCollaborator
 from app.config import settings
 from app.database import get_db
-from app.schemas.base import AIDorkRequest, AssetResponse, CensysEnrichRequest, DomainDeepAnalysisRequest, DnstwistRequest, EmailBreachRequest, EmailDeepAnalysisRequest, PivotRequest, ScanCreate, ScanCreateSimple, ScanCreateV2, ScanCreateResponse, ScanDetailResponse, ScanJobResponse, ScanResponse, SetPrimaryDomainRequest, ShodanEnrichRequest, SubdomainEnrichRequest, TelegramMonitorRequest, ThreatIntelRequest
+from app.schemas.base import AIDorkRequest, AssetObservationResponse, AssetObservationSummaryResponse, AssetResponse, CensysEnrichRequest, ContentDiscoveryRequest, DomainDeepAnalysisRequest, DnstwistRequest, EmailBreachRequest, EmailDeepAnalysisRequest, PivotRequest, ScanCreate, ScanCreateSimple, ScanCreateV2, ScanCreateResponse, ScanDetailResponse, ScanFacetsResponse, ScanJobResponse, ScanResponse, ScopeManifestInput, ScreenshotEvidenceResponse, SetPrimaryDomainRequest, ShodanEnrichRequest, SubdomainEnrichRequest, TelegramMonitorRequest, ThreatIntelRequest
 from app.models.scan import Scan
 from app.models.scan_job import ScanJob
 from app.models.asset import Asset
+from app.models.asset_observation import AssetObservation
+from app.models.screenshot import ScreenshotEvidence
+from app.services.asset_service import append_asset_observation
 from app.core.auth import get_authenticated_user, can_read_scan, can_modify_scan
 from app.schemas.auth import AddScanCollaboratorRequest, ScanCollaboratorResponse, ScanPermissionResponse
 from app.workers.scan_tasks import execute_scan_task
@@ -37,9 +41,48 @@ from app.workers.ahmia_task import ahmia_search_task
 from app.workers.ip_scan import execute_ip_scan_task
 from app.workers.org_scan import execute_org_scan_task, execute_org_infra_task
 from app.workers.active_validation import active_validation_task
+from app.workers.screenshot_capture import screenshot_capture_task
+from app.workers.content_discovery import content_discovery_task
 from app.services.job_service import dispatch_scan_job
+from app.services.scope import ScopeEvaluator, normalized_scope_manifest
+from app.services.screenshot_capture import storage_path
 
 logger = logging.getLogger("osint.api.scans")
+
+
+def _scope_payload(scan_in, target_type: str, target: str) -> dict:
+    supplied = scan_in.scope_manifest.model_dump() if scan_in.scope_manifest else None
+    return normalized_scope_manifest(supplied, target_type, target)
+
+
+def _scope_evaluator(scan: Scan) -> ScopeEvaluator:
+    return ScopeEvaluator(
+        scan.scope_manifest, target_type=scan.target_type, target=scan.target_domain
+    )
+
+
+def _require_scoped_domain(scan: Scan, domain: str) -> None:
+    evaluator = _scope_evaluator(scan)
+    decisions = (
+        evaluator.evaluate_asset("DOMAIN", domain),
+        evaluator.evaluate_asset("SUBDOMAIN", domain),
+    )
+    if not any(decision.allowed for decision in decisions):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Domain is outside scan scope: {decisions[0].reason}. Include the asset first.",
+        )
+
+
+def _require_scoped_ip(scan: Scan, ip: str) -> None:
+    decision = _scope_evaluator(scan).evaluate_asset(
+        "IP_ADDRESS", ip, derived=True
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"IP is outside scan scope: {decision.reason}. Include the asset first.",
+        )
 
 # ── Redis-backed running-task lock ─────────────────────────────────────
 # Prevents duplicate deep analysis dispatches for the same scan+domain
@@ -91,6 +134,7 @@ async def create_scan(
         scan_mode=scan_in.scan_mode.value,
         selected_vectors=scan_in.selected_vectors,
         target_usernames=scan_in.target_usernames,
+        scope_manifest=_scope_payload(scan_in, "domain", scan_in.target_domain),
         status="QUEUED",
         owner_id=current_user.id,
     )
@@ -161,6 +205,7 @@ async def create_initial_scan(
         scan_mode=scan_in.scan_mode.value,
         selected_vectors=["INFRASTRUCTURE"],
         target_usernames=[],
+        scope_manifest=_scope_payload(scan_in, "domain", scan_in.target_domain),
         status="QUEUED",
         owner_id=current_user.id,
     )
@@ -217,6 +262,7 @@ async def create_ip_scan(
         scan_mode=scan_in.scan_mode.value,
         selected_vectors=scan_in.selected_vectors or ["INFRASTRUCTURE"],
         target_usernames=scan_in.target_usernames or [],
+        scope_manifest=_scope_payload(scan_in, "ip", scan_in.target_value),
         status="QUEUED",
         owner_id=current_user.id,
     )
@@ -264,6 +310,7 @@ async def create_org_scan(
         scan_mode=scan_in.scan_mode.value,
         selected_vectors=scan_in.selected_vectors or ["INFRASTRUCTURE"],
         target_usernames=scan_in.target_usernames or [],
+        scope_manifest=_scope_payload(scan_in, "organization", scan_in.target_value),
         status="QUEUED",
         owner_id=current_user.id,
     )
@@ -311,6 +358,9 @@ async def trigger_org_infra(
         )
 
     scan.target_domain = body.domain
+    scan.scope_manifest = normalized_scope_manifest(
+        scan.scope_manifest, "domain", body.domain
+    )
     scan.status = "RUNNING"
     scan.completed_at = None
     job = await dispatch_scan_job(
@@ -434,6 +484,7 @@ async def get_scan(
         "celery_task_id": db_scan.celery_task_id,
         "selected_vectors": db_scan.selected_vectors,
         "target_usernames": db_scan.target_usernames,
+        "scope_manifest": db_scan.scope_manifest,
         "created_at": db_scan.created_at,
         "completed_at": db_scan.completed_at,
         "updated_at": db_scan.updated_at,
@@ -460,6 +511,56 @@ async def list_scan_jobs(
     return list(result.scalars().all())
 
 
+@router.get("/{scan_id}/facets", response_model=ScanFacetsResponse)
+async def get_scan_facets(
+    scan_id: str,
+    db: AsyncSession = Depends(get_db),
+    scan: Scan = Depends(can_read_scan()),
+):
+    """Return exact grouped counts without loading the scan's evidence rows."""
+
+    async def grouped(column, model) -> dict[str, int]:
+        rows = (
+            await db.execute(
+                select(column, func.count(model.id))
+                .where(model.scan_id == scan_id)
+                .group_by(column)
+            )
+        ).all()
+        return {str(key): int(count) for key, count in rows if key is not None}
+
+    findings_by_entity_type = await grouped(Finding.entity_type, Finding)
+    findings_by_severity = await grouped(Finding.severity, Finding)
+    findings_by_source = await grouped(Finding.source_module, Finding)
+    findings_by_vector = await grouped(Finding.vector_type, Finding)
+    assets_by_state = await grouped(Asset.state, Asset)
+    jobs_by_status = await grouped(ScanJob.status, ScanJob)
+
+    asset_counts = (
+        await db.execute(
+            select(
+                func.count(Asset.id),
+                func.count(Asset.id).filter(Asset.in_scope.is_(True)),
+                func.count(Asset.id).filter(Asset.wildcard_suspected.is_(True)),
+            ).where(Asset.scan_id == scan_id)
+        )
+    ).one()
+
+    return {
+        "findings_total": sum(findings_by_entity_type.values()),
+        "findings_by_entity_type": findings_by_entity_type,
+        "findings_by_severity": findings_by_severity,
+        "findings_by_source": findings_by_source,
+        "findings_by_vector": findings_by_vector,
+        "assets_total": int(asset_counts[0] or 0),
+        "assets_in_scope": int(asset_counts[1] or 0),
+        "assets_wildcard_suspected": int(asset_counts[2] or 0),
+        "assets_by_state": assets_by_state,
+        "jobs_total": sum(jobs_by_status.values()),
+        "jobs_by_status": jobs_by_status,
+    }
+
+
 @router.get("/{scan_id}/assets", response_model=List[AssetResponse])
 async def list_scan_assets(
     scan_id: str,
@@ -479,6 +580,308 @@ async def list_scan_assets(
         stmt.order_by(Asset.state.desc(), Asset.canonical_value.asc()).limit(limit)
     )
     return list(result.scalars().all())
+
+
+@router.get(
+    "/{scan_id}/asset-observation-summary",
+    response_model=List[AssetObservationSummaryResponse],
+)
+async def summarize_asset_observations(
+    scan_id: str,
+    limit: int = Query(5000, ge=1, le=5000),
+    db: AsyncSession = Depends(get_db),
+    scan: Scan = Depends(can_read_scan()),
+):
+    """Return exact first/last/count aggregates without loading the event ledger."""
+    rows = (
+        await db.execute(
+            select(
+                AssetObservation.asset_id.label("asset_id"),
+                func.count(AssetObservation.id).label("observation_count"),
+                func.min(AssetObservation.observed_at).label("first_observed_at"),
+                func.max(AssetObservation.observed_at).label("last_observed_at"),
+            )
+            .where(AssetObservation.scan_id == scan_id)
+            .group_by(AssetObservation.asset_id)
+            .order_by(func.max(AssetObservation.observed_at).desc())
+            .limit(limit)
+        )
+    ).mappings().all()
+    return list(rows)
+
+
+@router.get(
+    "/{scan_id}/asset-observations",
+    response_model=List[AssetObservationResponse],
+)
+async def list_asset_observations(
+    scan_id: str,
+    asset_id: Optional[str] = Query(None, max_length=64),
+    canonical_value: Optional[str] = Query(None, max_length=2048),
+    limit: int = Query(1000, ge=1, le=5000),
+    db: AsyncSession = Depends(get_db),
+    scan: Scan = Depends(can_read_scan()),
+):
+    """Return the newest immutable asset lifecycle events for a scan."""
+    stmt = select(AssetObservation).where(AssetObservation.scan_id == scan_id)
+    if asset_id:
+        stmt = stmt.where(AssetObservation.asset_id == asset_id)
+    if canonical_value:
+        stmt = stmt.where(AssetObservation.canonical_value == canonical_value)
+    result = await db.execute(
+        stmt.order_by(AssetObservation.observed_at.desc()).limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+@router.get("/{scan_id}/screenshots", response_model=List[ScreenshotEvidenceResponse])
+async def list_scan_screenshots(
+    scan_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    scan: Scan = Depends(can_read_scan()),
+):
+    records = (
+        await db.execute(
+            select(ScreenshotEvidence)
+            .where(ScreenshotEvidence.scan_id == scan_id)
+            .order_by(ScreenshotEvidence.created_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    return [
+        {
+            "id": record.id,
+            "scan_id": record.scan_id,
+            "asset_id": record.asset_id,
+            "url": record.url,
+            "sha256": record.sha256,
+            "width": record.width,
+            "height": record.height,
+            "page_title": record.page_title,
+            "status_code": record.status_code,
+            "capture_metadata": record.capture_metadata,
+            "created_at": record.created_at,
+            "image_url": f"/scans/{scan_id}/screenshots/{record.id}/image",
+        }
+        for record in records
+    ]
+
+
+@router.get("/{scan_id}/screenshots/{screenshot_id}/image")
+async def get_scan_screenshot_image(
+    scan_id: str,
+    screenshot_id: str,
+    db: AsyncSession = Depends(get_db),
+    scan: Scan = Depends(can_read_scan()),
+):
+    record = await db.get(ScreenshotEvidence, screenshot_id)
+    if not record or record.scan_id != scan_id:
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    path = storage_path(settings.SCREENSHOT_STORAGE_PATH, record.storage_key)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Screenshot file is missing")
+    return FileResponse(
+        path,
+        media_type="image/png",
+        filename=f"screenshot-{record.id}.png",
+        content_disposition_type="inline",
+        headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+@router.post("/{scan_id}/screenshots/capture", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_screenshot_capture(
+    scan_id: str,
+    db: AsyncSession = Depends(get_db),
+    scan: Scan = Depends(can_modify_scan()),
+):
+    if scan.scan_mode == "passive":
+        raise HTTPException(
+            status_code=409,
+            detail="Screenshot capture requires a Validated or Active scan",
+        )
+    eligible_count = await db.scalar(
+        select(func.count(Asset.id)).where(
+            Asset.scan_id == scan_id,
+            Asset.asset_type == "URL",
+            Asset.state == "LIVE",
+            Asset.in_scope.is_(True),
+            Asset.wildcard_suspected.is_(False),
+        )
+    )
+    if not eligible_count:
+        raise HTTPException(status_code=409, detail="No verified in-scope live URLs to capture")
+    existing = await db.execute(
+        select(ScanJob.id).where(
+            ScanJob.scan_id == scan_id,
+            ScanJob.job_type == "screenshot_capture",
+            ScanJob.status.in_(("QUEUED", "RUNNING", "RETRYING")),
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Screenshot capture is already running")
+    job = await dispatch_scan_job(
+        db,
+        screenshot_capture_task,
+        scan_id,
+        job_type="screenshot_capture",
+        stage="web_evidence",
+        input_type="live_urls",
+        input_value=f"{eligible_count} verified live URLs",
+    )
+    return {"task_id": job.celery_task_id, "scan_id": scan_id, "targets": eligible_count}
+
+
+@router.post("/{scan_id}/content-discovery", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_content_discovery(
+    scan_id: str,
+    body: ContentDiscoveryRequest,
+    db: AsyncSession = Depends(get_db),
+    scan: Scan = Depends(can_modify_scan()),
+):
+    """Run a small, explicit path profile against verified in-scope live URLs."""
+    if scan.scan_mode != "active":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Content discovery requires a scan created in Active mode",
+        )
+    eligible_count = await db.scalar(
+        select(func.count(Asset.id)).where(
+            Asset.scan_id == scan_id,
+            Asset.asset_type == "URL",
+            Asset.state == "LIVE",
+            Asset.in_scope.is_(True),
+            Asset.wildcard_suspected.is_(False),
+        )
+    )
+    if not eligible_count:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No verified in-scope live URLs are available for content discovery",
+        )
+    existing = await db.execute(
+        select(ScanJob.id).where(
+            ScanJob.scan_id == scan_id,
+            ScanJob.job_type == "content_discovery",
+            ScanJob.status.in_(("QUEUED", "RUNNING", "RETRYING")),
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Content discovery is already running")
+    job = await dispatch_scan_job(
+        db,
+        content_discovery_task,
+        scan_id,
+        job_type="content_discovery",
+        stage="content_discovery",
+        input_type="profile",
+        input_value={"profile": body.profile, "eligible_urls": eligible_count},
+        task_args=(body.profile,),
+    )
+    return {
+        "task_id": job.celery_task_id,
+        "scan_id": scan_id,
+        "profile": body.profile,
+        "targets": eligible_count,
+    }
+
+
+@router.put("/{scan_id}/scope", response_model=ScanResponse)
+async def replace_scan_scope(
+    scan_id: str,
+    body: ScopeManifestInput,
+    db: AsyncSession = Depends(get_db),
+    scan: Scan = Depends(can_modify_scan()),
+):
+    """Replace a scan's scope and immediately reclassify its asset inventory."""
+    running = await db.execute(
+        select(ScanJob.id).where(
+            ScanJob.scan_id == scan_id,
+            ScanJob.job_type == "active_validation",
+            ScanJob.status.in_(("QUEUED", "RUNNING", "RETRYING")),
+        )
+    )
+    if running.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Scope cannot change while active validation is running")
+    scan.scope_manifest = normalized_scope_manifest(
+        body.model_dump(), scan.target_type, scan.target_domain
+    )
+    evaluator = ScopeEvaluator(scan.scope_manifest, target_type=scan.target_type, target=scan.target_domain)
+    assets = (await db.execute(select(Asset).where(Asset.scan_id == scan_id))).scalars().all()
+    for asset in assets:
+        previous_allowed = asset.in_scope
+        previous_reason = asset.scope_reason
+        derived = "dns_resolver" in (asset.source_modules or [])
+        decision = evaluator.evaluate_asset(asset.asset_type, asset.canonical_value, derived=derived)
+        asset.in_scope = decision.allowed
+        asset.scope_reason = decision.reason
+        if asset.in_scope != previous_allowed or asset.scope_reason != previous_reason:
+            append_asset_observation(
+                db,
+                asset=asset,
+                source_module="scope_engine",
+                event_type="SCOPE_CHANGED",
+                evidence={
+                    "previous_in_scope": previous_allowed,
+                    "previous_scope_reason": previous_reason,
+                    "scope_reason": decision.reason,
+                },
+            )
+    await db.commit()
+    await db.refresh(scan)
+    return scan
+
+
+@router.post("/{scan_id}/assets/{asset_id}/include", response_model=AssetResponse)
+async def include_asset_in_scope(
+    scan_id: str,
+    asset_id: str,
+    db: AsyncSession = Depends(get_db),
+    scan: Scan = Depends(can_modify_scan()),
+):
+    """Explicitly include one discovered asset without broadening automatic scope."""
+    running = await db.execute(
+        select(ScanJob.id).where(
+            ScanJob.scan_id == scan_id,
+            ScanJob.job_type == "active_validation",
+            ScanJob.status.in_(("QUEUED", "RUNNING", "RETRYING")),
+        )
+    )
+    if running.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Scope cannot change while active validation is running")
+    asset = await db.get(Asset, asset_id)
+    if not asset or asset.scan_id != scan_id:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    manifest = normalized_scope_manifest(scan.scope_manifest, scan.target_type, scan.target_domain)
+    inclusion = f"{asset.asset_type}:{asset.canonical_value}"
+    included = set(manifest.get("included_assets") or [])
+    included.add(inclusion)
+    manifest["included_assets"] = sorted(included)
+    evaluator = ScopeEvaluator(manifest, target_type=scan.target_type, target=scan.target_domain)
+    decision = evaluator.evaluate_asset(asset.asset_type, asset.canonical_value, derived=True)
+    if not decision.allowed:
+        raise HTTPException(status_code=422, detail=decision.reason)
+    scan.scope_manifest = manifest
+    previous_allowed = asset.in_scope
+    previous_reason = asset.scope_reason
+    asset.in_scope = True
+    asset.scope_reason = decision.reason
+    append_asset_observation(
+        db,
+        asset=asset,
+        source_module="manual_include",
+        event_type="SCOPE_CHANGED",
+        evidence={
+            "previous_in_scope": previous_allowed,
+            "previous_scope_reason": previous_reason,
+            "scope_reason": decision.reason,
+            "manual": True,
+        },
+    )
+    await db.commit()
+    await db.refresh(asset)
+    return asset
 
 
 @router.post("/{scan_id}/pivot", status_code=status.HTTP_202_ACCEPTED)
@@ -514,6 +917,8 @@ async def trigger_subdomain_enrich(
     scan: Scan = Depends(can_modify_scan()),
 ):
     """Trigger Hunter + XposedOrNot on user-selected subdomains."""
+    for domain in body.subdomains:
+        _require_scoped_domain(scan, domain)
     job = await dispatch_scan_job(
         db,
         subdomain_enrich_task,
@@ -572,6 +977,7 @@ async def trigger_domain_deep_analysis(
     prevents multiple dispatch from UI race conditions or rapid clicks.
     The lock auto-expires after 30 minutes (sufficient for any deep analysis).
     """
+    _require_scoped_domain(scan, body.domain)
     lock_key = f"deep_analysis:running:{scan_id}:{body.domain}"
     acquired = await _check_and_set_running_lock(lock_key, ttl_seconds=1800)
     if not acquired:
@@ -609,7 +1015,7 @@ async def trigger_active_validation(
     db: AsyncSession = Depends(get_db),
     scan: Scan = Depends(can_modify_scan()),
 ):
-    """Run Naabu -> Nmap and Nuclei against verified assets in Active mode."""
+    """Run bounded network, web, TLS, crawl, and takeover checks on scoped assets."""
     if scan.scan_mode != "active":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -653,6 +1059,7 @@ async def trigger_secrets_scan(
     Much faster than /domain-deep-analysis — searches GitHub public repos for
     leaked secrets and repos mentioning the target domain. Used by the Secrets tab.
     """
+    _require_scoped_domain(scan, body.domain)
     job = await dispatch_scan_job(
         db,
         github_secrets_scan_task,
@@ -703,6 +1110,7 @@ async def trigger_threat_intel(
     scan: Scan = Depends(can_modify_scan()),
 ):
     """Trigger GitHub secrets + dnstwist scan on a domain."""
+    _require_scoped_domain(scan, body.domain)
     job = await dispatch_scan_job(
         db,
         threat_intel_task,
@@ -734,6 +1142,7 @@ async def trigger_shodan_enrich(
     - "censys": runs Censys Host API only
     - "both": runs both sequentially
     """
+    _require_scoped_ip(scan, body.ip)
     provider = body.provider or "shodan"
     task_ids = []
 
@@ -782,6 +1191,7 @@ async def trigger_censys_enrich(
     Runs the Censys Host API to get detailed port/service/vulnerability
     data for a single IP. Uses Censys search credits.
     """
+    _require_scoped_ip(scan, body.ip)
     job = await dispatch_scan_job(
         db,
         censys_enrich_task,
@@ -811,6 +1221,7 @@ async def trigger_dnstwist(
     Generates permutations of the domain and checks which are actively
     registered (DNS resolution). Results appear in Brand Protection tab.
     """
+    _require_scoped_domain(scan, body.domain)
     job = await dispatch_scan_job(
         db,
         dnstwist_only_task,
@@ -1403,6 +1814,20 @@ async def delete_scan(
             detail=f"Cannot delete a scan with status {scan.status}. Wait for completion or reset it first.",
         )
 
+    screenshot_keys = list((await db.execute(
+        select(ScreenshotEvidence.storage_key).where(
+            ScreenshotEvidence.scan_id == scan_id
+        )
+    )).scalars().all())
     await db.delete(scan)
     await db.commit()
+    for key in screenshot_keys:
+        try:
+            storage_path(settings.SCREENSHOT_STORAGE_PATH, key).unlink(missing_ok=True)
+        except (OSError, ValueError) as exc:
+            logger.warning("Failed to remove screenshot evidence %s: %s", key, exc)
+    try:
+        storage_path(settings.SCREENSHOT_STORAGE_PATH, scan_id).rmdir()
+    except OSError:
+        pass
     return None

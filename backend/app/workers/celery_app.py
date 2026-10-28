@@ -1,6 +1,13 @@
 from celery import Celery
+from celery.signals import after_setup_logger, after_setup_task_logger
 from app.config import settings
+from app.core.logging_security import suppress_http_client_request_logs
 from app.workers.tracked_task import TrackedTask
+
+
+after_setup_logger.connect(suppress_http_client_request_logs)
+after_setup_task_logger.connect(suppress_http_client_request_logs)
+suppress_http_client_request_logs()
 
 celery_app = Celery(
     "osint_worker",
@@ -49,6 +56,8 @@ import app.workers.dnstwist_task  # noqa: F401, E402
 import app.workers.telegram_task  # noqa: F401, E402
 import app.workers.ahmia_task  # noqa: F401, E402
 import app.workers.active_validation  # noqa: F401, E402
+import app.workers.screenshot_capture  # noqa: F401, E402
+import app.workers.content_discovery  # noqa: F401, E402
 
 # Pre-import the collectors registry in the worker parent process so the
 # forked children inherit it on sys.path. Without this, `from collectors...`

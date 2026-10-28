@@ -2,7 +2,8 @@ import { useState, type FormEvent } from 'react';
 import { Link, useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Radio, Eye, EyeOff, Loader2, AlertCircle, CheckCircle, ChevronRight } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/auth-state';
+import { errorMessage } from '../utils/errors';
 
 export default function Login() {
   const navigate = useNavigate();
@@ -31,10 +32,8 @@ export default function Login() {
     try {
       await login(username.trim(), password);
       navigate(from, { replace: true });
-    } catch (err: any) {
-      const detail =
-        err?.response?.data?.detail || 'Login failed. Check your credentials.';
-      setError(detail);
+    } catch (err: unknown) {
+      setError(errorMessage(err, 'Login failed. Check your credentials.'));
     } finally {
       setIsSubmitting(false);
     }

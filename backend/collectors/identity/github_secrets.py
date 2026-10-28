@@ -13,7 +13,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-from collectors.base import BaseCollector, CollectorMetadata
+from collectors.base import BaseCollector, CollectorConfigurationError, CollectorMetadata
 from app.config import settings
 
 
@@ -166,15 +166,17 @@ class GitHubSecretsCollector(BaseCollector):
             return self._github
         try:
             from github import Github, GithubRetry
-            token = settings.GITHUB_TOKEN or ""
+            token = (settings.GITHUB_TOKEN or "").strip()
+            if not token:
+                raise CollectorConfigurationError(
+                    "GitHub secret search is unavailable: configure GITHUB_TOKEN"
+                )
             retry = GithubRetry(total=3, status_forcelist=[429, 500, 502, 503, 504])
-            if token:
-                self._github = Github(token, per_page=self.PER_PAGE, retry=retry)
-            else:
-                self._github = Github(per_page=self.PER_PAGE, retry=retry)
+            self._github = Github(token, per_page=self.PER_PAGE, retry=retry)
         except ImportError:
-            print("[github_secrets] PyGithub not installed. Run: pip install PyGithub")
-            self._github = None
+            raise CollectorConfigurationError(
+                "GitHub secret search is unavailable: PyGithub is not installed"
+            )
         return self._github
 
     async def collect(self, target: str) -> List[Dict[str, Any]]:
@@ -192,12 +194,12 @@ class GitHubSecretsCollector(BaseCollector):
 
         # Run the blocking PyGithub calls in a thread pool
         import asyncio
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         try:
             # 1. Search for repos belonging to the organization
             repos = await loop.run_in_executor(
-                None, self._search_repos, g, brand
+                None, self._search_repos, g, brand, domain_clean
             )
             for repo in repos:
                 results.append({
@@ -217,19 +219,25 @@ class GitHubSecretsCollector(BaseCollector):
             for match in code_matches:
                 results.append(match)
 
+        except CollectorConfigurationError:
+            raise
         except Exception as e:
             print(f"[github_secrets] error: {e}")
             return []
 
         return results
 
-    def _search_repos(self, g, brand: str):
-        """Search for repos matching the brand name, paginating up to REPO_LIMIT."""
+    def _search_repos(self, g, brand: str, domain: str):
+        """Search repositories containing the exact target domain.
+
+        Brand-only README searches are too broad for short names such as
+        ``utm``. Repository context is therefore anchored to the domain.
+        """
         from github import GithubException
         result: list = []
         try:
             repos = g.search_repositories(
-                query=f"{brand} in:name,description,readme",
+                query=f'"{domain}" in:description,readme',
                 sort="stars",
                 order="desc",
             )
@@ -238,6 +246,10 @@ class GitHubSecretsCollector(BaseCollector):
                 try:
                     items = repos.get_page(page)
                 except GithubException as exc:
+                    if exc.status == 401:
+                        raise CollectorConfigurationError(
+                            "GitHub authentication failed: check GITHUB_TOKEN"
+                        ) from exc
                     if exc.status == 403:
                         print(f"[github_secrets] repo search 403/rate-limited, returning {len(result)} repos so far")
                     else:
@@ -254,6 +266,10 @@ class GitHubSecretsCollector(BaseCollector):
                 page += 1
             return result
         except GithubException as exc:
+            if exc.status == 401:
+                raise CollectorConfigurationError(
+                    "GitHub authentication failed: check GITHUB_TOKEN"
+                ) from exc
             if exc.status == 403:
                 print(f"[github_secrets] repo search 403/rate-limited, returning {len(result)} repos so far")
                 return result
@@ -305,6 +321,10 @@ class GitHubSecretsCollector(BaseCollector):
             try:
                 code_results = g.search_code(query=query)
             except GithubException as exc:
+                if exc.status == 401:
+                    raise CollectorConfigurationError(
+                        "GitHub authentication failed: check GITHUB_TOKEN"
+                    ) from exc
                 if exc.status == 403:
                     print(f"[github_secrets] code search 403 on '{query[:40]}...', skipping")
                 else:
@@ -321,6 +341,10 @@ class GitHubSecretsCollector(BaseCollector):
                 try:
                     items = code_results.get_page(page)
                 except GithubException as exc:
+                    if exc.status == 401:
+                        raise CollectorConfigurationError(
+                            "GitHub authentication failed: check GITHUB_TOKEN"
+                        ) from exc
                     if exc.status == 403:
                         print(f"[github_secrets] code search 403 on '{query[:40]}...', stopping")
                     else:
@@ -451,15 +475,20 @@ class GitHubSecretsCollector(BaseCollector):
         if not lines:
             return "far"
 
-        # Targets the user might have used in the query — check for any
-        # of them so a mention of the brand name in a config block counts.
-        targets = [t for t in {domain, brand, domain.split('.')[0]} if t]
+        # Domain matches are literal. Brand matches must be standalone tokens;
+        # substring checks make short brands match unrelated identifiers.
+        domain_lower = domain.lower()
+        brand_pattern = re.compile(
+            rf"(?<![a-z0-9]){re.escape(brand.lower())}(?![a-z0-9])"
+        ) if brand else None
 
-        # Find lines containing any target (domain or brand)
+        # Find lines containing the domain or a standalone brand token.
         target_lines = []
         for i, line in enumerate(lines):
             line_lower = line.lower()
-            if any(t in line_lower for t in targets):
+            if domain_lower in line_lower or (
+                brand_pattern is not None and brand_pattern.search(line_lower)
+            ):
                 target_lines.append(i)
 
         # Find lines containing any credential keyword
@@ -507,8 +536,8 @@ class GitHubSecretsCollector(BaseCollector):
         and publisher signals captured during collect():
           - Specific secret type (AWS_*, PRIVATE_KEY, DATABASE_URL, etc.) +
             near proximity + human publisher  → HIGH / 0.95
-          - Specific secret type + far proximity  → HIGH / 0.75
-          - Specific secret type + auto publisher  → MEDIUM / 0.6
+          - Specific secret type + far proximity + human publisher → MEDIUM / 0.55
+          - Specific secret type + far proximity + auto publisher → LOW / 0.4
           - UNKNOWN_SECRET (no specific pattern) + near + human  → MEDIUM / 0.6
           - UNKNOWN_SECRET + far / auto  → LOW / 0.3
         """
@@ -520,6 +549,7 @@ class GitHubSecretsCollector(BaseCollector):
                 "entity_value": raw["repo_url"],
                 "severity": "INFO",
                 "confidence": 0.7,
+                "tags": ["github", "repository-search-match", "search-strategy:exact-domain-v2"],
                 "normalized_data": {
                     "repo_name": raw["repo_name"],
                     "repo_url": raw["repo_url"],
@@ -527,6 +557,7 @@ class GitHubSecretsCollector(BaseCollector):
                     "language": raw.get("language", ""),
                     "stars": raw.get("stars", 0),
                     "target_brand": raw.get("target_brand", ""),
+                    "search_strategy": "exact_domain_v2",
                     "source": "github_secrets",
                 },
             }
@@ -536,14 +567,10 @@ class GitHubSecretsCollector(BaseCollector):
         proximity = raw.get("domain_proximity", "far")
         auto_generated = bool(raw.get("auto_generated"))
 
-        specific = secret_type in (
-            "AWS_ACCESS_KEY", "AWS_SECRET_KEY", "PRIVATE_KEY",
-            "DATABASE_URL", "STRIPE_SECRET", "GITHUB_TOKEN",
-            "SSH_PRIVATE_KEY", "SLACK_TOKEN", "SENDGRID_KEY",
-            "MAILGUN_KEY", "TWILIO_TOKEN", "HEROKU_KEY", "DO_TOKEN",
-            "NPM_TOKEN", "PYPI_TOKEN", "CONNECTION_STRING",
-            "CLIENT_SECRET", "JWT_SECRET", "ENCRYPTION_KEY",
-        )
+        # Any successful regex classification is more specific than the broad
+        # keyword-only fallback. Keeping this rule derived from the classifier
+        # prevents newly added patterns from silently receiving UNKNOWN scores.
+        specific = secret_type not in ("UNKNOWN", "UNKNOWN_SECRET")
 
         # ── Severity logic ──
         if specific and proximity == "near" and not auto_generated:
@@ -553,11 +580,11 @@ class GitHubSecretsCollector(BaseCollector):
             severity = "MEDIUM"
             confidence = 0.7
         elif specific and proximity == "far" and not auto_generated:
-            severity = "HIGH"
-            confidence = 0.75
-        elif specific and proximity == "far" and auto_generated:
             severity = "MEDIUM"
             confidence = 0.55
+        elif specific and proximity == "far" and auto_generated:
+            severity = "LOW"
+            confidence = 0.4
         elif not specific and proximity == "near" and not auto_generated:
             # UNKNOWN_SECRET but keyword IS near the domain — likely real
             severity = "MEDIUM"
@@ -575,6 +602,13 @@ class GitHubSecretsCollector(BaseCollector):
             "entity_value": f"{raw['repo_url']}::{raw['file_path']}",
             "severity": severity,
             "confidence": confidence,
+            "tags": [
+                "github",
+                "potential-secret",
+                secret_type.lower(),
+                f"proximity:{proximity}",
+                "classifier:v2",
+            ],
             "normalized_data": {
                 "repo_name": raw["repo_name"],
                 "repo_url": raw["repo_url"],
@@ -586,6 +620,7 @@ class GitHubSecretsCollector(BaseCollector):
                 "domain_proximity": proximity,
                 "publisher_email": raw.get("publisher_email", ""),
                 "auto_generated": auto_generated,
+                "classifier_version": 2,
                 "source": "github_secrets",
             },
         }

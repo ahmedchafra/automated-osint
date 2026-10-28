@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import apiClient from '../api/client';
 import { useQuery } from '@tanstack/react-query';
+import { errorMessage } from '../utils/errors';
 
 export default function Settings() {
   /* ── Change password state ──────────────────────────────── */
@@ -70,9 +71,8 @@ export default function Settings() {
       setOldPassword('');
       setNewPassword('');
       setConfirmPassword('');
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || 'Failed to update password.';
-      setPwMsg({ ok: false, text: detail });
+    } catch (err: unknown) {
+      setPwMsg({ ok: false, text: errorMessage(err, 'Failed to update password.') });
     } finally {
       setSubmitting(false);
     }

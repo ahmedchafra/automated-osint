@@ -43,6 +43,9 @@ class ScanOrchestrator:
             target_domain=scan.target_domain,
             target_usernames=list(scan.target_usernames or []),
             publisher=self.publisher,
+            target_type=scan.target_type,
+            scan_mode=scan.scan_mode,
+            scope_manifest=dict(scan.scope_manifest or {}),
         )
 
         scan.status = "RUNNING"

@@ -13,6 +13,14 @@ class CollectorMetadata(BaseModel):
     requires_api_key: bool
     api_key_env: Optional[str] = None
 
+
+class CollectorConfigurationError(RuntimeError):
+    """Permanent collector setup/authentication failure.
+
+    These failures must reach the job runner so the UI reports a failed job
+    instead of presenting an empty result as a successful collection.
+    """
+
 class BaseCollector(abc.ABC):
     USER_AGENTS = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -65,6 +73,11 @@ class BaseCollector(abc.ABC):
                     normalized_results.append(normalized)
 
                 return normalized_results
+
+            except CollectorConfigurationError:
+                # Retrying cannot fix a missing/rejected credential. Let the
+                # tracked job persist the actionable error for the frontend.
+                raise
 
             except (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError) as e:
                 # Transient transport-level issue: retry with backoff.

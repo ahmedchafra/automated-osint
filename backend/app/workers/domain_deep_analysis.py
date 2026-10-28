@@ -1,7 +1,8 @@
 """Domain deep analysis task.
 
 Triggered when an analyst clicks "Conduct Deep Analysis" on a subdomain
-row in the Infrastructure tab. Runs eight collectors IN PARALLEL:
+row in the Infrastructure tab. Runs archive and intelligence collectors
+in parallel:
   1. hunter_domain      — discovers ALL emails for the domain
   2. theharvester       — email/host/subdomain harvest (quick=free, full=all API keys)
   3. github_secrets     — finds leaked secrets/repos mentioning the domain
@@ -9,7 +10,9 @@ row in the Infrastructure tab. Runs eight collectors IN PARALLEL:
   5. builtwith          — web technology fingerprinting (BuiltWith Free API)
   6. http_headers       — HTTP response headers + redirect chain capture
   7. wayback_machine    — archive.org historical URL discovery
-  8. version_detector   — probes HTTP headers & HTML for technology versions
+  8. common_crawl       — Common Crawl historical URL/subdomain discovery
+  9. dns_email_posture  — passive DNS and email-authentication posture
+ 10. version_detector   — probes HTTP headers & HTML for technology versions
 
 After the parallel batch, two sequential steps run:
   1. Version enrichment — reads TECHNOLOGY and TECHNOLOGY_VERSION findings
@@ -95,6 +98,8 @@ def _collector_specs(scan_mode: str, has_verified_asset: bool) -> list[tuple[str
         ("github_secrets", None),
         ("builtwith", None),
         ("wayback_machine", None),
+        ("common_crawl", None),
+        ("dns_email_posture", None),
     ]
     if scan_mode != "passive":
         specs.append(("dnstwist", None))
@@ -295,6 +300,8 @@ def domain_deep_analysis_task(self, scan_id: str, domain: str,
                 "builtwith": collector_counts.get("builtwith", 0),
                 "web_surface": collector_counts.get("web_surface", 0),
                 "wayback_urls": collector_counts.get("wayback_machine", 0),
+                "common_crawl": collector_counts.get("common_crawl", 0),
+                "dns_email_posture": collector_counts.get("dns_email_posture", 0),
                 "versions_detected": collector_counts.get("version_detector", 0),
                 "technology_cves": cve_count,
                 "total_findings": total,

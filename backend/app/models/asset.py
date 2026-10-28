@@ -1,4 +1,6 @@
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
+from datetime import datetime, timezone
+
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.models.base import BaseModel
@@ -24,6 +26,7 @@ class Asset(BaseModel):
     registrable_domain = Column(String, nullable=True, index=True)
     state = Column(String, nullable=False, default="CANDIDATE", index=True)
     in_scope = Column(Boolean, nullable=False, default=True)
+    scope_reason = Column(String, nullable=False, default="allowed")
     wildcard_suspected = Column(Boolean, nullable=False, default=False)
     source_modules = Column(JSON, nullable=False, default=list)
     evidence_count = Column(Integer, nullable=False, default=1)
@@ -31,10 +34,18 @@ class Asset(BaseModel):
     resolved_ips = Column(JSON, nullable=False, default=list)
     http_metadata = Column(JSON, nullable=False, default=dict)
     last_observed_at = Column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
     )
     updated_at = Column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
     )
 
     scan = relationship("Scan", back_populates="assets")
+    observations = relationship(
+        "AssetObservation", back_populates="asset", cascade="all, delete-orphan"
+    )
